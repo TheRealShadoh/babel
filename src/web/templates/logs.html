@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Logs</h1>
+    <div style="display:flex;gap:0.3rem;">
+        <button class="btn btn-sm btn-primary" onclick="loadLogs('')">All</button>
+        <button class="btn btn-sm" style="background:rgba(59,130,246,0.12);color:var(--blue);border:1px solid rgba(59,130,246,0.3);" onclick="loadLogs('INFO')">Info</button>
+        <button class="btn btn-sm" style="background:rgba(245,158,11,0.12);color:var(--yellow);border:1px solid rgba(245,158,11,0.3);" onclick="loadLogs('WARNING')">Warning</button>
+        <button class="btn btn-sm" style="background:rgba(244,63,94,0.12);color:var(--red);border:1px solid rgba(244,63,94,0.3);" onclick="loadLogs('ERROR')">Error</button>
+    </div>
+</div>
+<div class="card" style="padding:0.5rem;max-height:70vh;overflow-y:auto;" id="log-content"
+     hx-get="/api/logs" hx-trigger="load, every 10s" hx-swap="innerHTML">
+    Loading...
+</div>
+<script>
+function loadLogs(level) {
+    const el = document.getElementById('log-content');
+    const url = level ? '/api/logs?level=' + level : '/api/logs';
+    htmx.ajax('GET', url, {target: '#log-content', swap: 'innerHTML'});
+    // Update the hx-get for auto-refresh
+    el.setAttribute('hx-get', url);
+}
+</script>
+{% endblock %}

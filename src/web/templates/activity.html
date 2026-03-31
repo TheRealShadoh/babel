@@ -1,0 +1,345 @@
+{% extends "base.html" %}
+
+{% block title %}Activity{% endblock %}
+
+{% block extra_head %}
+<style>
+    /* ── Stats bar ── */
+    .activity-stats {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        margin-bottom: 1.5rem;
+    }
+
+    .stat-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        border-radius: 999px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+    }
+
+    .stat-num {
+        font-family: var(--font-mono);
+        font-size: 1.1rem;
+        font-weight: 700;
+    }
+
+    .stat-blue {
+        background: rgba(129, 140, 248, 0.12);
+        color: var(--blue);
+        border: 1px solid rgba(129, 140, 248, 0.25);
+    }
+
+    .stat-green {
+        background: rgba(45, 212, 191, 0.12);
+        color: var(--green);
+        border: 1px solid rgba(45, 212, 191, 0.25);
+    }
+
+    .stat-yellow {
+        background: rgba(245, 158, 11, 0.12);
+        color: var(--yellow);
+        border: 1px solid rgba(245, 158, 11, 0.25);
+    }
+
+    .stat-gray {
+        background: rgba(100, 116, 139, 0.12);
+        color: var(--gray);
+        border: 1px solid rgba(100, 116, 139, 0.25);
+    }
+
+    /* ── Section headings ── */
+    .section-heading {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .section-heading::before {
+        content: '';
+        display: inline-block;
+        width: 3px;
+        height: 1em;
+        border-radius: 2px;
+        background: var(--accent);
+    }
+
+    .activity-section {
+        margin-bottom: 2rem;
+    }
+
+    /* ── Download cards ── */
+    .download-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .dl-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        padding: 0.75rem 1rem;
+        transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .dl-card:hover {
+        border-color: rgba(168, 85, 247, 0.2);
+        box-shadow: 0 0 12px rgba(168, 85, 247, 0.08);
+    }
+
+    .dl-card-inner {
+        display: flex;
+        gap: 0.85rem;
+        align-items: flex-start;
+    }
+
+    .dl-poster {
+        width: 42px;
+        height: 62px;
+        border-radius: 4px;
+        object-fit: cover;
+        flex-shrink: 0;
+        background: var(--bg-elevated);
+    }
+
+    .dl-poster-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-muted);
+    }
+
+    .dl-info {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .dl-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        margin-bottom: 0.15rem;
+    }
+
+    .dl-series {
+        font-weight: 600;
+        font-size: 0.88rem;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .dl-episode {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-bottom: 0.4rem;
+    }
+
+    .dl-progress-wrap {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.3rem;
+    }
+
+    .dl-progress-bar {
+        flex: 1;
+        height: 6px;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 3px;
+        overflow: hidden;
+    }
+
+    .dl-progress-fill {
+        height: 100%;
+        border-radius: 3px;
+        transition: width 0.5s ease;
+    }
+
+    .dl-progress-bar.bar-animated .dl-progress-fill {
+        background-image: linear-gradient(
+            -45deg,
+            rgba(255,255,255,0.15) 25%,
+            transparent 25%,
+            transparent 50%,
+            rgba(255,255,255,0.15) 50%,
+            rgba(255,255,255,0.15) 75%,
+            transparent 75%
+        );
+        background-size: 16px 16px;
+        animation: barbershop 0.8s linear infinite;
+    }
+
+    @keyframes barbershop {
+        from { background-position: 0 0; }
+        to { background-position: 16px 0; }
+    }
+
+    .dl-pct {
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        min-width: 2.5em;
+        text-align: right;
+    }
+
+    .dl-meta {
+        display: flex;
+        gap: 0.75rem;
+        font-size: 0.72rem;
+        font-family: var(--font-mono);
+        color: var(--text-muted);
+    }
+
+    .dl-eta {
+        color: var(--blue);
+    }
+
+    .dl-warning {
+        margin-top: 0.3rem;
+        font-size: 0.72rem;
+        color: var(--yellow);
+        background: rgba(245, 158, 11, 0.08);
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+        border-left: 2px solid var(--yellow);
+    }
+
+    .empty-activity {
+        text-align: center;
+        padding: 2rem 1rem;
+        color: var(--text-muted);
+        font-size: 0.88rem;
+    }
+
+    /* ── Recently resolved ── */
+    .recent-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+    }
+
+    .recent-item {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--border-color);
+        font-size: 0.82rem;
+        transition: background-color 0.15s;
+    }
+
+    .recent-item:last-child {
+        border-bottom: none;
+    }
+
+    .recent-item:hover {
+        background: rgba(168, 85, 247, 0.03);
+    }
+
+    .recent-icon {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+    }
+
+    .recent-series {
+        font-weight: 500;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 280px;
+    }
+
+    .recent-ep {
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        flex-shrink: 0;
+    }
+
+    .recent-when {
+        margin-left: auto;
+        font-size: 0.72rem;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        flex-shrink: 0;
+    }
+
+    .recent-success {
+        border-left: 2px solid var(--green);
+    }
+
+    .recent-failed {
+        border-left: 2px solid var(--red);
+    }
+
+    /* ── Live indicator ── */
+    .live-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--green);
+        animation: pulse-live 2s ease-in-out infinite;
+        margin-right: 0.4rem;
+    }
+
+    @keyframes pulse-live {
+        0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(45, 212, 191, 0.4); }
+        50% { opacity: 0.7; box-shadow: 0 0 0 6px rgba(45, 212, 191, 0); }
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 640px) {
+        .dl-poster {
+            display: none;
+        }
+
+        .recent-series {
+            max-width: 140px;
+        }
+
+        .stat-pill {
+            padding: 0.35rem 0.75rem;
+            font-size: 0.75rem;
+        }
+
+        .stat-num {
+            font-size: 0.95rem;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><span class="live-dot"></span> Activity</h1>
+</div>
+
+<div id="activity-feed"
+     hx-get="/api/activity/html"
+     hx-trigger="load, every 5s"
+     hx-swap="innerHTML">
+    <div style="display:flex;align-items:center;gap:0.5rem;padding:2rem;justify-content:center;color:var(--text-muted);">
+        <span class="spinner"></span> Loading activity feed...
+    </div>
+</div>
+{% endblock %}

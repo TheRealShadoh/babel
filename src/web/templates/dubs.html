@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+
+{% block title %}Dubs{% endblock %}
+
+{% block extra_head %}
+<style>
+    .dub-tabs {
+        display: flex;
+        gap: 0.25rem;
+        margin-bottom: 1.25rem;
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 0;
+    }
+
+    .dub-tab {
+        padding: 0.6rem 1.2rem;
+        font-size: 0.88rem;
+        font-weight: 500;
+        color: var(--text-muted);
+        text-decoration: none;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px;
+        transition: color 0.15s, border-color 0.15s;
+    }
+
+    .dub-tab:hover {
+        color: var(--text-primary);
+        text-decoration: none;
+    }
+
+    .dub-tab--active {
+        color: var(--text-primary);
+        border-bottom-color: var(--accent);
+    }
+
+    .dub-tab__count {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.75rem;
+        padding: 0.1rem 0.4rem;
+        border-radius: 999px;
+        margin-left: 0.3rem;
+        background: rgba(255, 255, 255, 0.06);
+    }
+
+    .dub-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 0.75rem;
+    }
+
+    .dub-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius);
+        padding: 0.85rem 1rem;
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+        transition: border-color 0.2s, box-shadow 0.2s;
+        cursor: pointer;
+        text-decoration: none;
+        color: inherit;
+    }
+
+    .dub-card:hover {
+        border-color: rgba(168, 85, 247, 0.3);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+        text-decoration: none;
+        color: inherit;
+    }
+
+    .dub-card__poster { flex-shrink: 0; width: 45px; }
+    .dub-card__poster img { width: 45px; height: auto; border-radius: 5px; object-fit: cover; display: block; }
+    .dub-card__poster-placeholder { width: 45px; height: 62px; border-radius: 5px; background: rgba(255,255,255,0.04); border: 1px dashed rgba(255,255,255,0.1); }
+    .dub-card__body { flex: 1; min-width: 0; }
+    .dub-card__title { font-weight: 600; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 0.2rem; }
+    .dub-card__meta { font-size: 0.78rem; color: var(--text-muted); display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+
+    .btn-lookup {
+        display: inline-flex; align-items: center; gap: 0.5rem;
+        padding: 0.45rem 1rem; border: none; border-radius: 6px;
+        font-size: 0.82rem; font-weight: 600; cursor: pointer; color: #fff;
+        background: linear-gradient(135deg, var(--accent), #6366f1);
+        transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn-lookup:hover { opacity: 0.85; }
+
+    .empty-section { color: var(--text-muted); font-size: 0.9rem; padding: 2rem 1rem; text-align: center; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Dub Intelligence</h1>
+    <button class="btn-lookup"
+            hx-post="/api/lookup-dubs"
+            hx-target="#lookup-result"
+            hx-swap="innerHTML">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Lookup Dub Availability
+        <span class="htmx-indicator"><span class="spinner"></span></span>
+    </button>
+</div>
+
+<div id="lookup-result" class="mb-2"></div>
+
+<!-- Tabs -->
+<div class="dub-tabs">
+    <a href="/dubs?tab=recent" class="dub-tab {{ 'dub-tab--active' if tab == 'recent' }}">
+        Recently Dubbed<span class="dub-tab__count">{{ recently_dubbed | length }}</span>
+    </a>
+    <a href="/dubs?tab=expected" class="dub-tab {{ 'dub-tab--active' if tab == 'expected' }}">
+        Dub Expected<span class="dub-tab__count">{{ dub_expected | length }}</span>
+    </a>
+    <a href="/dubs?tab=nodub" class="dub-tab {{ 'dub-tab--active' if tab == 'nodub' }}">
+        No Dub<span class="dub-tab__count">{{ no_dub_count }}</span>
+    </a>
+</div>
+
+{% if tab == 'recent' %}
+<!-- Recently Dubbed -->
+{% if recently_dubbed %}
+<div class="dub-grid">
+    {% for s in recently_dubbed %}
+    <a href="/series/{{ s.id }}" class="dub-card">
+        <div class="dub-card__poster">
+            {% if s.poster_url %}<img src="{{ s.poster_url }}" alt="{{ s.title }}" loading="lazy">{% else %}<div class="dub-card__poster-placeholder"></div>{% endif %}
+        </div>
+        <div class="dub-card__body">
+            <div class="dub-card__title" title="{{ s.title }}">{{ s.title }}</div>
+            <div class="dub-card__meta">
+                <span class="badge badge-green" style="font-size:0.72rem;">{{ s.upgraded_count }} eps upgraded</span>
+                <span>{{ s.last_upgrade_at[:10] if s.last_upgrade_at else '' }}</span>
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-section">No series upgraded to dubbed in the last 30 days.</div>
+{% endif %}
+
+{% elif tab == 'expected' %}
+<!-- Dub Expected -->
+{% if dub_expected %}
+<div class="dub-grid">
+    {% for s in dub_expected %}
+    {% set dubbed_pct = (s.dubbed_count / s.total_episodes * 100) | round(0) | int if s.total_episodes > 0 else 0 %}
+    <a href="/series/{{ s.id }}" class="dub-card">
+        <div class="dub-card__poster">
+            {% if s.poster_url %}<img src="{{ s.poster_url }}" alt="{{ s.title }}" loading="lazy">{% else %}<div class="dub-card__poster-placeholder"></div>{% endif %}
+        </div>
+        <div class="dub-card__body">
+            <div class="dub-card__title" title="{{ s.title }}">{{ s.title }}</div>
+            <div class="dub-card__meta">
+                {% if s.dub_available == 'available' %}
+                    <span class="badge badge-green" style="font-size:0.72rem;">Dub Available</span>
+                {% else %}
+                    <span class="badge badge-yellow" style="font-size:0.72rem;">Dub Likely</span>
+                {% endif %}
+                {% if s.dub_licensors %}<span>{{ s.dub_licensors }}</span>{% endif %}
+                <span>{{ dubbed_pct }}% dubbed</span>
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-section">No series with expected dubs found. Run a dub availability lookup first.</div>
+{% endif %}
+
+{% elif tab == 'nodub' %}
+<!-- No Dub Available -->
+{% if no_dub_series %}
+<div class="dub-grid">
+    {% for s in no_dub_series %}
+    <a href="/series/{{ s.id }}" class="dub-card" style="border-color: rgba(100,116,139,0.2);">
+        <div class="dub-card__poster">
+            {% if s.poster_url %}<img src="{{ s.poster_url }}" alt="{{ s.title }}" loading="lazy">{% else %}<div class="dub-card__poster-placeholder"></div>{% endif %}
+        </div>
+        <div class="dub-card__body">
+            <div class="dub-card__title" title="{{ s.title }}">{{ s.title }}</div>
+            <div class="dub-card__meta">
+                <span class="badge badge-gray" style="font-size:0.72rem;">No Known Dub</span>
+                <span>{{ s.sub_only_count }} sub-only eps</span>
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-section">No series marked as having no dub. Run a dub availability lookup first.</div>
+{% endif %}
+{% endif %}
+{% endblock %}

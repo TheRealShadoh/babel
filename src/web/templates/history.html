@@ -1,0 +1,272 @@
+{% extends "base.html" %}
+
+{% block title %}History{% endblock %}
+
+{% block extra_head %}
+<style>
+    .history-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1.25rem;
+        align-items: start;
+    }
+
+    @media (max-width: 900px) {
+        .history-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .history-col { min-width: 0; }
+
+    .section-title {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+        font-size: 0.92rem;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .section-title svg { flex-shrink: 0; color: var(--text-muted); }
+
+    .scan-timeline { display: flex; flex-direction: column; gap: 0.5rem; max-height: 500px; overflow-y: auto; }
+
+    .scan-entry {
+        display: flex; gap: 0.6rem; align-items: flex-start;
+        padding: 0.6rem; border-radius: 6px;
+        background: var(--bg-card-hover, rgba(255, 255, 255, 0.02));
+        border: 1px solid var(--border-color);
+        transition: border-color 0.15s;
+    }
+    .scan-entry:hover { border-color: var(--accent, var(--blue)); }
+
+    .scan-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; }
+    .scan-dot.green { background-color: var(--green); box-shadow: 0 0 6px rgba(45, 212, 191, 0.4); }
+    .scan-dot.red { background-color: var(--red); box-shadow: 0 0 6px rgba(244, 63, 94, 0.4); }
+    .scan-dot.blue { background-color: var(--blue); box-shadow: 0 0 6px rgba(59, 130, 246, 0.4); }
+    .scan-dot.gray { background-color: var(--gray); }
+
+    .scan-body { flex: 1; min-width: 0; }
+    .scan-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.2rem; }
+    .scan-time { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--text-muted); }
+    .scan-stats { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.15rem; }
+
+    .stat-pill {
+        display: inline-flex; align-items: center; gap: 0.2rem;
+        padding: 0.1rem 0.4rem; border-radius: 9999px; font-size: 0.68rem; font-weight: 500;
+        background: rgba(255, 255, 255, 0.04); color: var(--text-muted); border: 1px solid var(--border-color);
+    }
+    .stat-pill strong { color: var(--text-primary); font-weight: 600; }
+
+    .scan-error-box {
+        margin-top: 0.35rem; padding: 0.35rem 0.5rem; border-radius: 4px;
+        background: rgba(244, 63, 94, 0.08); border: 1px solid rgba(244, 63, 94, 0.2);
+        font-size: 0.72rem; color: var(--red); font-family: 'JetBrains Mono', monospace;
+        line-height: 1.3; word-break: break-word;
+    }
+
+    .scan-entry-link { text-decoration: none; color: inherit; display: block; }
+    .scan-entry-link:hover { text-decoration: none; color: inherit; }
+    .scan-entry-link:hover .scan-entry { border-color: var(--accent); }
+    .scan-detail-link { margin-top: 0.3rem; font-size: 0.72rem; color: var(--text-muted); }
+    .scan-entry-link:hover .scan-detail-link { color: var(--accent); }
+
+    .search-table-wrap { max-height: 500px; overflow-y: auto; }
+    .search-episode { font-weight: 500; color: var(--text-primary); font-size: 0.85rem; }
+    .search-code { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--text-muted); }
+    .search-timestamp { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--text-muted); }
+
+    .upgrade-bar-compact {
+        display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+        padding: 0.6rem 0.85rem; border-radius: 8px;
+        background: var(--bg-card); border: 1px solid var(--border-color);
+        margin-bottom: 1rem;
+    }
+    .upgrade-bar-compact .ub-label { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.3px; }
+    .ub-pill { padding: 0.2rem 0.5rem; border-radius: 999px; font-size: 0.72rem; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Live scan progress -->
+<div id="live-progress" hx-get="/api/scan/progress" hx-trigger="load, every 3s" hx-swap="innerHTML"></div>
+
+<!-- Upgrade Stats Bar (compact) -->
+{% if upgrade_stats and upgrade_stats.total > 0 %}
+<div class="upgrade-bar-compact">
+    <span class="ub-label">Upgrades</span>
+    <span class="ub-pill" style="color:var(--blue);border:1px solid rgba(59,130,246,0.3);background:rgba(59,130,246,0.08);">{{ upgrade_stats.total }} searches</span>
+    <span class="ub-pill" style="color:var(--green);border:1px solid rgba(45,212,191,0.3);background:rgba(45,212,191,0.08);">{{ upgrade_stats.success }} ok</span>
+    <span class="ub-pill" style="color:var(--red);border:1px solid rgba(244,63,94,0.3);background:rgba(244,63,94,0.08);">{{ upgrade_stats.failed }} fail</span>
+    <span class="ub-pill" style="color:var(--yellow);border:1px solid rgba(245,158,11,0.3);background:rgba(245,158,11,0.08);">{{ upgrade_stats.pending }} pending</span>
+    {% if upgrade_stats.pending > 0 %}
+    <div style="margin-left:auto;display:flex;gap:0.35rem;">
+        <button class="btn btn-sm" style="padding:0.2rem 0.55rem;font-size:0.72rem;font-weight:600;background:rgba(9,132,227,0.12);color:var(--blue);border:1px solid rgba(9,132,227,0.3);border-radius:999px;cursor:pointer;display:inline-flex;align-items:center;gap:0.25rem;"
+                hx-post="/api/check-downloads" hx-target="#dl-result" hx-swap="innerHTML">
+            Check DLs <span class="htmx-indicator"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;"></span></span>
+        </button>
+        <button class="btn btn-sm" style="padding:0.2rem 0.55rem;font-size:0.72rem;font-weight:600;background:rgba(245,158,11,0.12);color:var(--yellow);border:1px solid rgba(245,158,11,0.3);border-radius:999px;cursor:pointer;display:inline-flex;align-items:center;gap:0.25rem;"
+                hx-post="/api/resolve-imports" hx-target="#dl-result" hx-swap="innerHTML">
+            Fix Imports <span class="htmx-indicator"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;"></span></span>
+        </button>
+    </div>
+    {% endif %}
+</div>
+<div id="dl-result" style="margin-bottom:0.5rem;"></div>
+{% endif %}
+
+<div class="page-header" style="margin-bottom:1rem;">
+    <h1>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom; margin-right: 0.3rem; color: var(--text-muted);">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+        History
+    </h1>
+</div>
+
+<!-- Two-column layout -->
+<div class="history-grid">
+    <!-- LEFT: Scan Runs -->
+    <div class="history-col">
+        <div class="card" style="padding:0.85rem;">
+            <div class="section-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 10 10"/><line x1="12" y1="12" x2="12" y2="2"/></svg>
+                Scan Runs
+            </div>
+            {% if scan_logs %}
+            <div class="scan-timeline">
+                {% for log in scan_logs %}
+                <a href="/history/{{ log.id }}" class="scan-entry-link">
+                <div class="scan-entry">
+                    {% set dot_color = 'green' if log.status == 'completed' else 'red' if log.status == 'failed' else 'blue' if log.status == 'running' else 'gray' %}
+                    <div class="scan-dot {{ dot_color }}"></div>
+                    <div class="scan-body">
+                        <div class="scan-header">
+                            <span class="scan-time" data-timestamp>{{ log.started_at }}</span>
+                            {% if log.status == "completed" %}
+                                <span class="badge badge-green">Done</span>
+                            {% elif log.status == "cancelled" %}
+                                <span class="badge badge-yellow">Cancelled</span>
+                            {% elif log.status == "interrupted" %}
+                                <span class="badge badge-yellow">Interrupted</span>
+                            {% elif log.status == "failed" %}
+                                <span class="badge badge-red">Failed</span>
+                            {% elif log.status == "running" %}
+                                {% if scan_stopping %}
+                                <span class="badge" style="background:rgba(245,158,11,0.15);color:var(--yellow);border-radius:999px;padding:0.15rem 0.5rem;font-size:0.7rem;display:inline-flex;align-items:center;gap:0.25rem;">
+                                    <span class="spinner" style="width:8px;height:8px;border-width:1.5px;border-color:rgba(245,158,11,0.3);border-top-color:var(--yellow);"></span>
+                                    Stopping
+                                </span>
+                                {% else %}
+                                <span class="badge badge-blue">Running</span>
+                                <button class="btn btn-sm" style="background:rgba(244,63,94,0.15);color:var(--red);border:1px solid rgba(244,63,94,0.3);padding:0.15rem 0.45rem;font-size:0.68rem;margin-left:0.2rem;"
+                                        onclick="event.preventDefault();event.stopPropagation();htmx.ajax('POST','/api/scan/stop',{target:'#stop-{{ log.id }}',swap:'innerHTML'});">
+                                    Stop
+                                </button>
+                                {% endif %}
+                                <span id="stop-{{ log.id }}"></span>
+                            {% else %}
+                                <span class="badge badge-gray">{{ log.status }}</span>
+                            {% endif %}
+                        </div>
+                        <div class="scan-stats">
+                            <span class="stat-pill"><strong>{{ log.episodes_checked }}</strong> eps</span>
+                            <span class="stat-pill"><strong>{{ log.searches_triggered }}</strong> srch</span>
+                            <span class="stat-pill"><strong>{{ log.errors }}</strong> err</span>
+                        </div>
+                        {% if log.error_message %}
+                        <div class="scan-error-box">{{ log.error_message }}</div>
+                        {% endif %}
+                        <div class="scan-detail-link">Details &rarr;</div>
+                    </div>
+                </div>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state" style="padding:1.5rem;">No scans yet</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- RIGHT: Search & Upgrade History -->
+    <div class="history-col">
+        <!-- Search Attempts -->
+        <div class="card" style="padding:0.85rem;margin-bottom:1.25rem;">
+            <div class="section-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                Search Attempts
+            </div>
+            {% if search_history %}
+            <div class="search-table-wrap">
+            <table>
+                <thead><tr><th scope="col">Episode</th><th scope="col">When</th><th scope="col">Source</th></tr></thead>
+                <tbody>
+                {% for entry in search_history %}
+                <tr>
+                    <td>
+                        <span class="search-episode">{{ entry.series_title }}</span><br>
+                        <span class="search-code">S{{ "%02d"|format(entry.season_number or 0) }}E{{ "%02d"|format(entry.episode_number or 0) }}</span>
+                    </td>
+                    <td><span class="search-timestamp">{{ entry.triggered_at }}</span></td>
+                    <td>
+                        {% if entry.trigger_source == "auto" %}
+                            <span class="badge badge-blue" style="font-size:0.72rem;">Auto</span>
+                        {% else %}
+                            <span class="badge badge-gray" style="font-size:0.72rem;">Manual</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            </div>
+            {% else %}
+            <div class="empty-state" style="padding:1.5rem;">No searches yet</div>
+            {% endif %}
+        </div>
+
+        <!-- Upgrade Tracking -->
+        <div class="card" style="padding:0.85rem;">
+            <div class="section-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                Upgrade Tracking
+                {% if upgrade_stats and upgrade_stats.total > 0 %}
+                <span style="font-size:0.7rem;color:var(--text-muted);font-weight:400;margin-left:0.3rem;">
+                    {{ upgrade_stats.success }} ok / {{ upgrade_stats.failed }} fail / {{ upgrade_stats.pending }} pending
+                </span>
+                {% endif %}
+            </div>
+            {% if upgrade_history %}
+            <div class="scan-timeline" style="max-height:300px;">
+                {% for u in upgrade_history %}
+                <div class="scan-entry" style="padding:0.5rem;">
+                    <div class="scan-dot {{ 'green' if u.result == 'success' else 'red' if u.result == 'failed' else 'blue' }}"></div>
+                    <div class="scan-body">
+                        <div style="font-size:0.82rem;font-weight:500;">
+                            {{ u.series_title }}
+                            <span class="search-code">S{{ "%02d"|format(u.season_number or 0) }}E{{ "%02d"|format(u.episode_number or 0) }}</span>
+                        </div>
+                        <div style="display:flex;gap:0.3rem;align-items:center;margin-top:0.15rem;">
+                            {% if u.result == "success" %}
+                                <span class="badge badge-green" style="font-size:0.72rem;">Upgraded</span>
+                            {% elif u.result == "failed" %}
+                                <span class="badge badge-red" style="font-size:0.72rem;">Failed #{{ u.attempts }}</span>
+                            {% else %}
+                                <span class="badge badge-blue" style="font-size:0.72rem;">Pending</span>
+                            {% endif %}
+                            <span class="search-timestamp">{{ u.triggered_at[:16] if u.triggered_at else '' }}</span>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state" style="padding:1.5rem;">No upgrades tracked yet</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

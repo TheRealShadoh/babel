@@ -1,0 +1,504 @@
+{% extends "base.html" %}
+
+{% block title %}Series{% endblock %}
+
+{% block extra_head %}
+<style>
+    .page-subtitle {
+        font-size: 0.9rem;
+        color: var(--text-muted);
+        font-weight: 400;
+    }
+
+    .series-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1rem;
+    }
+
+    @media (max-width: 960px) {
+        .series-grid {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
+
+    @media (max-width: 600px) {
+        .series-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .series-card {
+        background-color: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius);
+        padding: 1.25rem;
+        cursor: pointer;
+        position: relative;
+        overflow: hidden;
+        transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+        display: flex;
+        gap: 1rem;
+    }
+
+    .series-card__poster {
+        flex-shrink: 0;
+        width: 60px;
+        align-self: center;
+    }
+
+    .series-card__poster img {
+        width: 60px;
+        height: auto;
+        border-radius: 6px;
+        object-fit: cover;
+        display: block;
+    }
+
+    .series-card__poster-placeholder {
+        width: 60px;
+        height: 80px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px dashed rgba(255, 255, 255, 0.1);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .series-card__poster-placeholder svg {
+        width: 24px;
+        height: 24px;
+        opacity: 0.25;
+    }
+
+    .series-card__body {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .series-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+    }
+
+    .series-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+    }
+
+    .series-card--green::before { background: linear-gradient(90deg, var(--green), rgba(0, 184, 148, 0.4)); }
+    .series-card--yellow::before { background: linear-gradient(90deg, var(--yellow), rgba(253, 203, 110, 0.4)); }
+    .series-card--red::before { background: linear-gradient(90deg, var(--red), rgba(225, 112, 85, 0.4)); }
+    .series-card--gray::before { background: linear-gradient(90deg, var(--gray), rgba(99, 110, 114, 0.4)); }
+
+    .series-card--green:hover { border-color: rgba(0, 184, 148, 0.4); box-shadow: 0 6px 24px rgba(0, 184, 148, 0.1); }
+    .series-card--yellow:hover { border-color: rgba(253, 203, 110, 0.4); box-shadow: 0 6px 24px rgba(253, 203, 110, 0.1); }
+    .series-card--red:hover { border-color: rgba(225, 112, 85, 0.4); box-shadow: 0 6px 24px rgba(225, 112, 85, 0.1); }
+    .series-card--gray:hover { border-color: rgba(99, 110, 114, 0.4); }
+
+    .series-card__title {
+        font-size: 1rem;
+        font-weight: 600;
+        margin-bottom: 0.75rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: var(--text-primary);
+    }
+
+    .series-card__progress {
+        width: 100%;
+        height: 6px;
+        background-color: rgba(255, 255, 255, 0.06);
+        border-radius: 3px;
+        overflow: hidden;
+        margin-bottom: 0.5rem;
+    }
+
+    .series-card__progress-fill {
+        height: 100%;
+        background: var(--green);
+        border-radius: 3px;
+        transition: width 0.4s ease;
+    }
+
+    .series-card__stats {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.6rem;
+    }
+
+    .series-card__fraction {
+        font-size: 0.9rem;
+        color: var(--text-primary);
+    }
+
+    .series-card__fraction strong {
+        font-family: 'JetBrains Mono', monospace;
+    }
+
+    .series-card__counts {
+        display: flex;
+        gap: 0.75rem;
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        font-family: 'JetBrains Mono', monospace;
+        border-top: 1px solid var(--border-color);
+        padding-top: 0.6rem;
+        margin-top: 0.2rem;
+    }
+
+    .series-card__counts span {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+    }
+
+    .count-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        display: inline-block;
+    }
+
+    .count-dot--green { background: var(--green); }
+    .count-dot--red { background: var(--red); }
+    .count-dot--gray { background: var(--gray); }
+
+    .empty-illustration {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1.25rem;
+    }
+
+    .empty-illustration svg {
+        width: 160px;
+        height: 120px;
+        opacity: 0.5;
+    }
+
+    .empty-illustration p {
+        font-size: 1rem;
+        max-width: 320px;
+    }
+
+    /* ── Filter bar ── */
+    .filter-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1.25rem;
+    }
+
+    .filter-pills {
+        display: flex;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+    }
+
+    .filter-pill {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.35rem 0.85rem;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 500;
+        border: 1px solid var(--border-color);
+        background: transparent;
+        color: var(--text-muted);
+        text-decoration: none;
+        transition: border-color 0.2s, background 0.2s, color 0.2s;
+        cursor: pointer;
+    }
+
+    .filter-pill:hover {
+        border-color: var(--text-muted);
+        color: var(--text-secondary);
+        text-decoration: none;
+    }
+
+    .filter-pill--active {
+        color: var(--text-primary);
+        border-color: var(--accent);
+        background: var(--accent-dim);
+    }
+
+    .filter-pill--green.filter-pill--active {
+        color: var(--green);
+        border-color: var(--green);
+        background: rgba(45, 212, 191, 0.12);
+    }
+
+    .filter-pill--yellow.filter-pill--active {
+        color: var(--yellow);
+        border-color: var(--yellow);
+        background: rgba(245, 158, 11, 0.12);
+    }
+
+    .filter-pill--red.filter-pill--active {
+        color: var(--red);
+        border-color: var(--red);
+        background: rgba(244, 63, 94, 0.12);
+    }
+
+    .filter-pill--gray.filter-pill--active {
+        color: var(--gray);
+        border-color: var(--gray);
+        background: rgba(100, 116, 139, 0.12);
+    }
+
+    .search-form {
+        display: flex;
+        align-items: center;
+        margin-left: auto;
+    }
+
+    .search-input {
+        padding: 0.4rem 0.75rem;
+        background-color: var(--bg-input);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        color: var(--text-primary);
+        font-size: 0.85rem;
+        font-family: var(--font-sans);
+        width: 220px;
+        transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .search-input:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.15);
+    }
+
+    .search-input::placeholder {
+        color: var(--text-muted);
+        opacity: 0.6;
+    }
+
+    .result-count {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        margin-bottom: 1rem;
+    }
+
+    /* ── Pagination ── */
+    .pagination {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 1rem;
+        margin-top: 2rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--border-color);
+    }
+
+    .pagination a,
+    .pagination span {
+        font-size: 0.85rem;
+    }
+
+    .pagination a {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.4rem 0.9rem;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        color: var(--text-secondary);
+        text-decoration: none;
+        transition: border-color 0.2s, background 0.2s;
+    }
+
+    .pagination a:hover {
+        border-color: var(--accent);
+        background: var(--accent-dim);
+        color: var(--text-primary);
+        text-decoration: none;
+    }
+
+    .pagination .page-info {
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+    }
+
+    .pagination .disabled {
+        opacity: 0.3;
+        pointer-events: none;
+    }
+
+    @media (max-width: 600px) {
+        .filter-bar {
+            flex-direction: column;
+            align-items: stretch;
+        }
+        .search-form {
+            margin-left: 0;
+        }
+        .search-input {
+            width: 100%;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+{# ── Helper macro: build URL preserving current params ── #}
+{% macro filter_url(status=None, q=None, pg=None, sort=None) -%}
+    /series?
+    {%- if status is not none %}status={{ status }}&{% endif -%}
+    {%- if q is not none and q != '' %}q={{ q }}&{% endif -%}
+    {%- if sort is not none and sort != '' %}sort={{ sort }}&{% endif -%}
+    {%- if pg is not none and pg > 1 %}page={{ pg }}{% endif -%}
+{%- endmacro %}
+
+<div class="page-header">
+    <div>
+        <h1>Anime Library</h1>
+    </div>
+</div>
+
+<!-- Filter bar -->
+<div class="filter-bar">
+    <div class="filter-pills">
+        <a href="{{ filter_url(q=search_query, sort=sort_by) }}"
+           class="filter-pill {{ 'filter-pill--active' if not filter_status }}">All</a>
+        <a href="{{ filter_url(status='DUBBED', q=search_query, sort=sort_by) }}"
+           class="filter-pill filter-pill--green {{ 'filter-pill--active' if filter_status == 'DUBBED' }}">Dubbed</a>
+        <a href="{{ filter_url(status='PARTIAL', q=search_query, sort=sort_by) }}"
+           class="filter-pill filter-pill--yellow {{ 'filter-pill--active' if filter_status == 'PARTIAL' }}">Partial</a>
+        <a href="{{ filter_url(status='SUB_ONLY', q=search_query, sort=sort_by) }}"
+           class="filter-pill filter-pill--red {{ 'filter-pill--active' if filter_status == 'SUB_ONLY' }}">Sub Only</a>
+        <a href="{{ filter_url(status='UNKNOWN', q=search_query, sort=sort_by) }}"
+           class="filter-pill filter-pill--gray {{ 'filter-pill--active' if filter_status == 'UNKNOWN' }}">Unknown</a>
+        <a href="{{ filter_url(status='EMPTY', q=search_query, sort=sort_by) }}"
+           class="filter-pill filter-pill--gray {{ 'filter-pill--active' if filter_status == 'EMPTY' }}">Empty</a>
+    </div>
+    <select class="search-input" style="width:auto;padding-right:1.5rem;cursor:pointer;" onchange="window.location=this.value;">
+        <option value="{{ filter_url(status=filter_status, q=search_query, sort='') }}" {{ 'selected' if not sort_by }}>Sort: A-Z</option>
+        <option value="{{ filter_url(status=filter_status, q=search_query, sort='title_desc') }}" {{ 'selected' if sort_by == 'title_desc' }}>Sort: Z-A</option>
+        <option value="{{ filter_url(status=filter_status, q=search_query, sort='dub_pct_desc') }}" {{ 'selected' if sort_by == 'dub_pct_desc' }}>Sort: Dub % High</option>
+        <option value="{{ filter_url(status=filter_status, q=search_query, sort='dub_pct_asc') }}" {{ 'selected' if sort_by == 'dub_pct_asc' }}>Sort: Dub % Low</option>
+        <option value="{{ filter_url(status=filter_status, q=search_query, sort='sub_only_desc') }}" {{ 'selected' if sort_by == 'sub_only_desc' }}>Sort: Sub-Only Count</option>
+    </select>
+    <form class="search-form" action="/series" method="get">
+        {% if filter_status %}
+        <input type="hidden" name="status" value="{{ filter_status }}">
+        {% endif %}
+        {% if sort_by %}
+        <input type="hidden" name="sort" value="{{ sort_by }}">
+        {% endif %}
+        <input type="text" name="q" class="search-input" placeholder="Search series..."
+               value="{{ search_query }}" autocomplete="off">
+    </form>
+</div>
+
+{% if series %}
+<div class="result-count">Showing {{ series | length }} of {{ total_count }} series{% if filter_status or search_query %} (filtered){% endif %}</div>
+
+<div class="series-grid">
+    {% for s in series %}
+    {% set status_class = 'green' if s.dub_status == 'DUBBED' else ('yellow' if s.dub_status == 'PARTIAL' else ('red' if s.dub_status == 'SUB_ONLY' else 'gray')) %}
+    {% set dubbed_pct = (s.dubbed_count / s.total_episodes * 100) if s.total_episodes > 0 else 0 %}
+    <a href="/series/{{ s.id }}" class="series-card series-card--{{ status_class }}{% if not show_thumbnails %} series-card--no-poster{% endif %}" style="text-decoration:none;color:inherit;">
+        {% if show_thumbnails %}
+        <div class="series-card__poster">
+            {% if s.poster_url %}
+            <img src="{{ s.poster_url }}" alt="{{ s.title }}" loading="lazy">
+            {% else %}
+            <div class="series-card__poster-placeholder">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2"/>
+                    <circle cx="8.5" cy="8.5" r="1.5"/>
+                    <polyline points="21,15 16,10 5,21"/>
+                </svg>
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+        <div class="series-card__body">
+            <div class="series-card__title" title="{{ s.title }}">{{ s.title }}</div>
+            <div class="series-card__progress">
+                <div class="series-card__progress-fill" style="width: {{ dubbed_pct | round(1) }}%"></div>
+            </div>
+            <div class="series-card__stats">
+                <span class="series-card__fraction"><strong>{{ s.dubbed_count }}</strong> / {{ s.total_episodes }} dubbed</span>
+                {% if s.dub_status == "DUBBED" %}
+                    <span class="badge badge-green">Dubbed</span>
+                {% elif s.dub_status == "PARTIAL" %}
+                    <span class="badge badge-yellow">Partial</span>
+                {% elif s.dub_status == "SUB_ONLY" %}
+                    <span class="badge badge-red">Sub Only</span>
+                {% elif s.dub_status == "EMPTY" %}
+                    <span class="badge badge-gray">Empty</span>
+                {% else %}
+                    <span class="badge badge-gray">Unknown</span>
+                {% endif %}
+            </div>
+            <div class="series-card__counts">
+                <span><span class="count-dot count-dot--green"></span>{{ s.dubbed_count }} dub</span>
+                <span><span class="count-dot count-dot--red"></span>{{ s.sub_only_count }} sub</span>
+                <span><span class="count-dot count-dot--gray"></span>{{ s.unknown_count }} unk</span>
+                {% if s.dub_available == 'available' %}
+                    <span style="color:var(--green);font-weight:600;margin-left:auto;">Dub Available</span>
+                {% elif s.dub_available == 'likely' %}
+                    <span style="color:var(--yellow);font-weight:600;margin-left:auto;">Dub Likely</span>
+                {% elif s.dub_available == 'unlikely' %}
+                    <span style="color:var(--text-muted);margin-left:auto;">No Known Dub</span>
+                {% endif %}
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+
+<!-- Pagination -->
+{% if total_pages > 1 %}
+<div class="pagination">
+    {% if page > 1 %}
+        <a href="{{ filter_url(status=filter_status, q=search_query, sort=sort_by, pg=page - 1) }}">Previous</a>
+    {% else %}
+        <a class="disabled" href="#">Previous</a>
+    {% endif %}
+
+    <span class="page-info">Page {{ page }} of {{ total_pages }}</span>
+
+    {% if page < total_pages %}
+        <a href="{{ filter_url(status=filter_status, q=search_query, sort=sort_by, pg=page + 1) }}">Next</a>
+    {% else %}
+        <a class="disabled" href="#">Next</a>
+    {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div class="card empty-state">
+    {% if filter_status or search_query %}
+    <p>No series match your filters.</p>
+    <a href="/series" class="btn btn-primary mt-2">Clear filters</a>
+    {% else %}
+    <div class="empty-illustration">
+        <svg viewBox="0 0 160 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="20" y="80" width="120" height="6" rx="2" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+            <rect x="35" y="55" width="20" height="25" rx="2" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.3"/>
+            <rect x="62" y="40" width="20" height="40" rx="2" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.3"/>
+            <rect x="89" y="50" width="20" height="30" rx="2" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.3"/>
+            <polygon points="80,8 85,18 84,18 88,28 86,28 90,38 70,38 74,28 72,28 76,18 75,18" stroke="currentColor" stroke-width="1.5" opacity="0.25" fill="none"/>
+            <line x1="80" y1="38" x2="80" y2="55" stroke="currentColor" stroke-width="1" opacity="0.2" stroke-dasharray="2 2"/>
+        </svg>
+        <p>No anime series found. Run a scan to get started.</p>
+        <a href="/" class="btn btn-primary">Go to Overview</a>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

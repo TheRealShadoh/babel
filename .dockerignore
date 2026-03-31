@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+__pycache__
+*.pyc
+data/
+*.db
+.env*
+*.png
+*.jpg
+screenshots/
+babel-*.png
+README.md
+unraid/
+docs/

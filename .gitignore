@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+data/
+*.db
+*.db-journal
+.venv/
+*.egg-info/
+dist/
+build/
+.claude/
+screenshots/*.tmp
+babel-*.png
+docs/superpowers/

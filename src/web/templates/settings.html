@@ -1,0 +1,345 @@
+{% extends "base.html" %}
+
+{% block title %}Settings{% endblock %}
+
+{% block extra_head %}
+<style>
+    .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; align-items: start; }
+    @media (max-width: 900px) { .settings-grid { grid-template-columns: 1fr; } }
+    .settings-col { min-width: 0; }
+
+    .card-title { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.75rem; font-size: 0.92rem; font-weight: 600; color: var(--text-primary); }
+    .card-title svg { flex-shrink: 0; color: var(--text-muted); }
+    .card-desc { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.6rem; line-height: 1.4; }
+    .helper-text { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; line-height: 1.3; }
+
+    .form-row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+    .form-row .form-group { flex: 1; min-width: 180px; }
+    .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 0.75rem; }
+    @media (max-width: 640px) { .form-grid-2 { grid-template-columns: 1fr; } }
+
+    .toggle-row { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.82rem; color: var(--text-primary); padding: 0.3rem 0; }
+    .toggle-row input { width: 15px; height: 15px; accent-color: var(--accent); flex-shrink: 0; }
+    .toggle-section { display: flex; flex-direction: column; gap: 0.15rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border-color); }
+    .toggle-section-label { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 0.2rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header" style="margin-bottom:1rem;">
+    <h1>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:text-bottom;margin-right:0.3rem;color:var(--text-muted);">
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1.08 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1.08z"/>
+        </svg>
+        Settings
+    </h1>
+    <button type="submit" form="settings-form" class="btn btn-success" style="padding:0.4rem 1rem;font-size:0.85rem;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+        Save All
+    </button>
+</div>
+
+{% if flash_message %}
+<div class="flash flash-success" style="margin-bottom:1rem;">{{ flash_message }}</div>
+{% endif %}
+
+<form method="POST" action="/settings" id="settings-form">
+<div class="settings-grid">
+    <!-- LEFT COLUMN: Connections + Scan Config -->
+    <div class="settings-col">
+        <!-- Connections -->
+        <div class="card" style="padding:0.85rem;">
+            <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                Connections
+            </div>
+            <!-- Sonarr -->
+            <div style="margin-bottom:0.75rem;">
+                <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Sonarr</div>
+                <div class="form-row">
+                    <div class="form-group" style="margin-bottom:0.35rem;">
+                        <input type="text" name="SONARR_URL" class="form-control" value="{{ settings.SONARR_URL or '' }}" placeholder="http://localhost:8989" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0.35rem;">
+                        <input type="password" name="SONARR_API_KEY" class="form-control" value="{{ settings.SONARR_API_KEY or '' }}" placeholder="API Key" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                    </div>
+                </div>
+                <button type="button" class="btn btn-sm btn-primary" style="font-size:0.72rem;padding:0.2rem 0.5rem;"
+                        hx-post="/api/test-sonarr" hx-target="#sonarr-st" hx-swap="innerHTML" hx-include="[name='SONARR_URL'],[name='SONARR_API_KEY']">
+                    Test <span class="htmx-indicator"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;"></span></span>
+                </button>
+                <span id="sonarr-st" style="font-size:0.78rem;margin-left:0.3rem;"></span>
+            </div>
+            <!-- Plex -->
+            <div style="margin-bottom:0.5rem;">
+                <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Plex</div>
+                <div class="form-row">
+                    <div class="form-group" style="margin-bottom:0.35rem;">
+                        <input type="text" name="PLEX_URL" class="form-control" value="{{ settings.PLEX_URL or '' }}" placeholder="http://localhost:32400" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0.35rem;">
+                        <input type="password" name="PLEX_TOKEN" class="form-control" value="{{ settings.PLEX_TOKEN or '' }}" placeholder="Token" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                    </div>
+                </div>
+                <button type="button" class="btn btn-sm btn-primary" style="font-size:0.72rem;padding:0.2rem 0.5rem;"
+                        hx-post="/api/test-plex" hx-target="#plex-st" hx-swap="innerHTML" hx-include="[name='PLEX_URL'],[name='PLEX_TOKEN']">
+                    Test <span class="htmx-indicator"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;"></span></span>
+                </button>
+                <span id="plex-st" style="font-size:0.78rem;margin-left:0.3rem;"></span>
+            </div>
+            <!-- Discord -->
+            <div style="margin-bottom:0.75rem;">
+                <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Discord Notifications</div>
+                <input type="text" name="DISCORD_WEBHOOK_URL" class="form-control" value="{{ settings.DISCORD_WEBHOOK_URL or '' }}" placeholder="https://discord.com/api/webhooks/..." style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                <div class="helper-text">Webhook URL for dub upgrade notifications</div>
+            </div>
+            <!-- Sonarr Webhook -->
+            <div style="margin-bottom:0.75rem;">
+                <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.25rem;text-transform:uppercase;letter-spacing:0.3px;">Sonarr Webhook (Instant Upgrades)</div>
+                <div style="font-size:0.78rem;color:var(--text-primary);font-family:'JetBrains Mono',monospace;background:rgba(168,85,247,0.06);padding:0.4rem 0.6rem;border-radius:4px;border:1px solid rgba(168,85,247,0.2);user-select:all;margin-bottom:0.4rem;">
+                    http://Babel:8686/api/webhook/sonarr
+                </div>
+                <div style="font-size:0.75rem;color:var(--text-muted);line-height:1.5;background:rgba(255,255,255,0.02);padding:0.5rem 0.6rem;border-radius:4px;border:1px solid var(--border-color);">
+                    <strong style="color:var(--text-primary);">Setup:</strong> Sonarr &rarr; Settings &rarr; Connect &rarr; + &rarr; Webhook<br>
+                    <strong>Name:</strong> Babel<br>
+                    <strong>URL:</strong> Copy the URL above (use your Babel container name or IP)<br>
+                    <strong>Events:</strong> Enable <em>On Import</em> and <em>On Upgrade</em><br>
+                    <strong>Tags:</strong> Leave empty for all series, or add your anime tags<br>
+                    <span style="font-size:0.72rem;">Gives Babel instant awareness of downloads — no more waiting for scan cycles.</span>
+                </div>
+            </div>
+            <!-- Webhook Secret -->
+            <div style="margin-top:0.5rem;">
+                <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Webhook Secret (Optional)</div>
+                <input type="password" name="WEBHOOK_SECRET" class="form-control" value="{{ settings.WEBHOOK_SECRET or '' }}" placeholder="Leave empty for no auth" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                <div class="helper-text">If set, append <code style="font-size:0.72rem;padding:0.1rem 0.25rem;background:rgba(255,255,255,0.06);border-radius:2px;">?apikey=YOUR_SECRET</code> to the webhook URL in Sonarr</div>
+            </div>
+        </div>
+
+        <!-- Scan Parameters -->
+        <div class="card" style="padding:0.85rem;margin-top:1.25rem;">
+            <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+                Scan Parameters
+            </div>
+            <div class="form-grid-2">
+                <div class="form-group">
+                    <label style="font-size:0.78rem;color:var(--text-muted);">Interval (hours)</label>
+                    <input type="number" name="SCAN_INTERVAL_HOURS" class="form-control" value="{{ settings.SCAN_INTERVAL_HOURS or 6 }}" min="1" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                </div>
+                <div class="form-group">
+                    <label style="font-size:0.78rem;color:var(--text-muted);">Target Language</label>
+                    <input type="text" name="TARGET_LANGUAGE" class="form-control" value="{{ settings.TARGET_LANGUAGE or 'eng' }}" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                </div>
+                <div class="form-group">
+                    <label style="font-size:0.78rem;color:var(--text-muted);">Cooldown (days)</label>
+                    <input type="number" name="SEARCH_COOLDOWN_DAYS" class="form-control" value="{{ settings.SEARCH_COOLDOWN_DAYS or 7 }}" min="0" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                </div>
+                <div class="form-group">
+                    <label style="font-size:0.78rem;color:var(--text-muted);">Rate Limit (/min)</label>
+                    <input type="number" name="SEARCH_RATE_LIMIT" class="form-control" value="{{ settings.SEARCH_RATE_LIMIT or 5 }}" min="1" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                </div>
+                <div class="form-group">
+                    <label style="font-size:0.78rem;color:var(--text-muted);">Max Search Attempts</label>
+                    <input type="number" name="MAX_SEARCH_ATTEMPTS" class="form-control" value="{{ settings.MAX_SEARCH_ATTEMPTS or 3 }}" min="0" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                    <div class="helper-text">Per 7-day window (0 = unlimited)</div>
+                </div>
+                <div class="form-group">
+                    <label style="font-size:0.78rem;color:var(--text-muted);">Anime Filter</label>
+                    <input type="text" name="ANIME_FILTER" class="form-control" value="{{ settings.ANIME_FILTER or 'type' }}" placeholder="type or tag:Name" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                </div>
+            </div>
+
+            <!-- Automation toggles -->
+            <div class="toggle-section">
+                <div class="toggle-section-label">Automation</div>
+                <label class="toggle-row"><input type="checkbox" name="SHOW_THUMBNAILS" value="true" {% if settings.SHOW_THUMBNAILS != 'false' %}checked{% endif %}>Show poster thumbnails</label>
+                <label class="toggle-row"><input type="checkbox" name="AUTO_TAG_SONARR" value="true" {% if settings.AUTO_TAG_SONARR != 'false' %}checked{% endif %}>Auto-tag Sonarr series (babel:dubbed/sub-only)</label>
+                <label class="toggle-row"><input type="checkbox" name="AUTO_COLLECTIONS_PLEX" value="true" {% if settings.AUTO_COLLECTIONS_PLEX != 'false' %}checked{% endif %}>Auto-manage Plex collections</label>
+                <label class="toggle-row"><input type="checkbox" name="AUTO_RESOLVE_IMPORTS" value="true" {% if settings.AUTO_RESOLVE_IMPORTS != 'false' %}checked{% endif %}>Auto-resolve stuck Sonarr imports</label>
+            </div>
+        </div>
+
+        <!-- Path Mapping (collapsible) -->
+        <details class="card" style="padding:0.85rem;margin-top:1.25rem;">
+            <summary style="cursor:pointer;font-size:0.92rem;font-weight:600;color:var(--text-primary);display:flex;align-items:center;gap:0.4rem;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                Path Mapping (Advanced)
+            </summary>
+            <div class="card-desc" style="margin-top:0.5rem;">Only needed if Sonarr and Plex see files at different mount paths.</div>
+            <div class="form-group"><label style="font-size:0.78rem;color:var(--text-muted);">Sonarr Prefix</label><input type="text" name="SONARR_PATH_PREFIX" class="form-control" value="{{ settings.SONARR_PATH_PREFIX or '' }}" placeholder="/tv" style="font-size:0.82rem;padding:0.35rem 0.6rem;"></div>
+            <div class="form-group"><label style="font-size:0.78rem;color:var(--text-muted);">Local Prefix</label><input type="text" name="LOCAL_PATH_PREFIX" class="form-control" value="{{ settings.LOCAL_PATH_PREFIX or '' }}" placeholder="/media/tv" style="font-size:0.82rem;padding:0.35rem 0.6rem;"></div>
+            <div class="form-group"><label style="font-size:0.78rem;color:var(--text-muted);">Plex Prefix</label><input type="text" name="PLEX_PATH_PREFIX" class="form-control" value="{{ settings.PLEX_PATH_PREFIX or '' }}" placeholder="/data/tv" style="font-size:0.82rem;padding:0.35rem 0.6rem;"></div>
+        </details>
+    </div>
+
+    <!-- RIGHT COLUMN: Actions + Library Filtering -->
+    <div class="settings-col">
+        <!-- Quick Actions -->
+        <div class="card" style="padding:0.85rem;">
+            <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                Quick Actions
+            </div>
+            <div style="display:flex;flex-direction:column;gap:0.6rem;">
+                <div style="display:flex;align-items:center;gap:0.6rem;">
+                    <button type="button" class="btn btn-sm btn-success" style="font-size:0.78rem;padding:0.3rem 0.7rem;white-space:nowrap;"
+                            hx-post="/api/setup-sonarr-dub" hx-target="#action-result" hx-swap="innerHTML"
+                            hx-confirm="Create Dual Audio custom format in Sonarr?">
+                        Setup Dub Preference
+                    </button>
+                    <span style="font-size:0.75rem;color:var(--text-muted);">Create Sonarr custom format for dual audio</span>
+                </div>
+                <div id="action-result"></div>
+            </div>
+        </div>
+
+        <!-- Library Filtering -->
+        <div class="card" style="padding:0.85rem;margin-top:1.25rem;">
+            <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                Library Filtering
+            </div>
+            <div class="card-desc">Choose which Plex libraries and Sonarr paths to scan.</div>
+
+            <!-- Plex -->
+            <div style="margin-bottom:0.75rem;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.35rem;">
+                    <span style="font-size:0.78rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.3px;">Plex Libraries</span>
+                    <button type="button" class="btn btn-sm btn-primary" id="discover-plex-btn" onclick="discoverPlex()" style="font-size:0.7rem;padding:0.2rem 0.5rem;">Discover</button>
+                </div>
+                <div id="plex-libraries"><p class="text-muted" style="font-size:0.78rem;">Click Discover to load.</p></div>
+            </div>
+
+            <!-- Sonarr -->
+            <div style="margin-bottom:0.75rem;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.35rem;">
+                    <span style="font-size:0.78rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.3px;">Sonarr Paths & Tags</span>
+                    <button type="button" class="btn btn-sm btn-primary" id="discover-sonarr-btn" onclick="discoverSonarr()" style="font-size:0.7rem;padding:0.2rem 0.5rem;">Discover</button>
+                </div>
+                <div id="sonarr-sources"><p class="text-muted" style="font-size:0.78rem;">Click Discover to load.</p></div>
+            </div>
+
+            <!-- Custom pattern -->
+            <details style="margin-top:0.5rem;">
+                <summary style="cursor:pointer;font-size:0.78rem;color:var(--text-muted);">Add custom ignore pattern</summary>
+                <div style="display:flex;gap:0.35rem;margin-top:0.35rem;flex-wrap:wrap;">
+                    <input type="text" id="ignore-pattern" name="pattern" class="form-control" style="flex:1;min-width:150px;font-size:0.8rem;padding:0.3rem 0.5rem;" placeholder="e.g. /media/tv/">
+                    <input type="text" id="ignore-note" name="note" class="form-control" style="width:120px;font-size:0.8rem;padding:0.3rem 0.5rem;" placeholder="Note">
+                    <button type="button" class="btn btn-sm btn-primary" style="font-size:0.72rem;padding:0.2rem 0.5rem;"
+                            hx-post="/api/ignore-path" hx-target="#ignore-list" hx-swap="innerHTML" hx-include="#ignore-pattern, #ignore-note">Add</button>
+                </div>
+            </details>
+
+            <!-- Active rules -->
+            <div style="margin-top:0.5rem;border-top:1px solid var(--border-color);padding-top:0.5rem;">
+                <div style="font-size:0.72rem;font-weight:600;color:var(--text-muted);margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.3px;">Active Ignore Rules</div>
+                <div id="ignore-list">
+                    {% if ignored_paths %}
+                        {% for p in ignored_paths %}
+                        <div style="display:flex;align-items:center;gap:0.4rem;padding:0.3rem 0;border-bottom:1px solid var(--border-color);">
+                            <code style="flex:1;font-size:0.78rem;color:var(--text-primary);">{{ p.pattern }}</code>
+                            <span style="font-size:0.7rem;color:var(--text-muted);">{{ p.note or "" }}</span>
+                            <button class="btn btn-sm" style="background:rgba(244,63,94,0.15);color:var(--red);border:1px solid rgba(244,63,94,0.3);padding:0.15rem 0.4rem;font-size:0.68rem;"
+                                    hx-post="/api/ignore-path/remove/{{ p.id }}" hx-target="#ignore-list" hx-swap="innerHTML" hx-confirm="Remove?">X</button>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <p class="text-muted" style="font-size:0.78rem;">None — all libraries scanned.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</form>
+
+<script>
+async function discoverPlex() {
+    const btn = document.getElementById('discover-plex-btn');
+    const container = document.getElementById('plex-libraries');
+    btn.disabled = true; btn.textContent = '...';
+    container.innerHTML = '<p class="text-muted" style="font-size:0.78rem;">Loading...</p>';
+    try {
+        const resp = await fetch('/api/discover/plex');
+        const data = await resp.json();
+        if (data.error) { container.innerHTML = '<p style="color:var(--red);font-size:0.78rem;">' + data.error + '</p>'; return; }
+        let html = '';
+        for (const lib of data.libraries) {
+            const ign = lib.ignored;
+            const col = ign ? 'var(--red)' : 'var(--green)';
+            const bs = ign ? 'background:rgba(45,212,191,0.12);color:var(--green);border:1px solid rgba(45,212,191,0.3);' : 'background:rgba(244,63,94,0.12);color:var(--red);border:1px solid rgba(244,63,94,0.3);';
+            const act = ign ? 'removeIgnoreByPattern(\'' + lib.path.replace(/'/g,"\\'") + '\')' : 'addIgnore(\'' + lib.path.replace(/'/g,"\\'") + '\',\'Plex: ' + lib.title.replace(/'/g,"\\'") + '\')';
+            html += '<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.5rem;border:1px solid var(--border-color);border-radius:6px;margin-bottom:0.3rem;">'
+                + '<div style="flex:1;min-width:0;"><div style="font-weight:500;font-size:0.82rem;">' + lib.title + '</div><div style="font-size:0.7rem;color:var(--text-muted);font-family:\'JetBrains Mono\',monospace;">' + lib.path + ' (' + (lib.count||0) + ')</div></div>'
+                + '<span style="font-size:0.65rem;font-weight:600;color:' + col + ';text-transform:uppercase;">' + (ign?'IGNORED':'ON') + '</span>'
+                + '<button type="button" class="btn btn-sm" style="' + bs + 'padding:0.2rem 0.5rem;font-size:0.7rem;" onclick="' + act + '">' + (ign?'Enable':'Ignore') + '</button></div>';
+        }
+        container.innerHTML = html || '<p class="text-muted" style="font-size:0.78rem;">No show libraries.</p>';
+    } catch(e) { container.innerHTML = '<p style="color:var(--red);font-size:0.78rem;">' + e.message + '</p>'; }
+    finally { btn.disabled = false; btn.textContent = 'Discover'; }
+}
+async function discoverSonarr() {
+    const btn = document.getElementById('discover-sonarr-btn');
+    const container = document.getElementById('sonarr-sources');
+    btn.disabled = true; btn.textContent = '...';
+    container.innerHTML = '<p class="text-muted" style="font-size:0.78rem;">Loading...</p>';
+    try {
+        const resp = await fetch('/api/discover/sonarr');
+        const data = await resp.json();
+        if (data.error) { container.innerHTML = '<p style="color:var(--red);font-size:0.78rem;">' + data.error + '</p>'; return; }
+        let html = '';
+        for (const rf of data.root_folders) {
+            const ign = rf.ignored;
+            const col = ign ? 'var(--red)' : 'var(--green)';
+            const bs = ign ? 'background:rgba(45,212,191,0.12);color:var(--green);border:1px solid rgba(45,212,191,0.3);' : 'background:rgba(244,63,94,0.12);color:var(--red);border:1px solid rgba(244,63,94,0.3);';
+            const act = ign ? 'removeIgnoreByPattern(\'' + rf.path.replace(/'/g,"\\'") + '\')' : 'addIgnore(\'' + rf.path.replace(/'/g,"\\'") + '\',\'Sonarr folder\')';
+            html += '<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.5rem;border:1px solid var(--border-color);border-radius:6px;margin-bottom:0.3rem;">'
+                + '<div style="flex:1;"><div style="font-size:0.78rem;font-family:\'JetBrains Mono\',monospace;">' + rf.path + '</div><div style="font-size:0.68rem;color:var(--text-muted);">' + (rf.series_count||0) + ' series</div></div>'
+                + '<span style="font-size:0.65rem;font-weight:600;color:' + col + ';text-transform:uppercase;">' + (ign?'IGNORED':'ON') + '</span>'
+                + '<button type="button" class="btn btn-sm" style="' + bs + 'padding:0.2rem 0.5rem;font-size:0.7rem;" onclick="' + act + '">' + (ign?'Enable':'Ignore') + '</button></div>';
+        }
+        if (data.tags && data.tags.length) {
+            html += '<div style="margin-top:0.5rem;display:flex;flex-wrap:wrap;gap:0.25rem;">';
+            for (const t of data.tags) {
+                const ign = t.ignored;
+                const bg = ign ? 'rgba(244,63,94,0.12)' : 'rgba(45,212,191,0.08)';
+                const bd = ign ? 'rgba(244,63,94,0.3)' : 'rgba(45,212,191,0.2)';
+                const tc = ign ? 'var(--red)' : 'var(--text-primary)';
+                const act = ign ? 'removeIgnoreByPattern(\'' + t.label.replace(/'/g,"\\'") + '\')' : 'addIgnore(\'tag:' + t.label.replace(/'/g,"\\'") + '\',\'Sonarr tag\')';
+                html += '<button type="button" onclick="' + act + '" style="padding:0.2rem 0.5rem;border-radius:999px;font-size:0.7rem;font-weight:500;background:' + bg + ';color:' + tc + ';border:1px solid ' + bd + ';cursor:pointer;">' + (ign?'✕ ':'') + t.label + '</button>';
+            }
+            html += '</div>';
+        }
+        container.innerHTML = html || '<p class="text-muted" style="font-size:0.78rem;">No folders found.</p>';
+    } catch(e) { container.innerHTML = '<p style="color:var(--red);font-size:0.78rem;">' + e.message + '</p>'; }
+    finally { btn.disabled = false; btn.textContent = 'Discover'; }
+}
+async function addIgnore(p, n) {
+    const f = new FormData(); f.append('pattern', p); f.append('note', n||'');
+    const r = await fetch('/api/ignore-path', {method:'POST', body:f});
+    document.getElementById('ignore-list').innerHTML = await r.text();
+    discoverPlex(); discoverSonarr();
+}
+async function removeIgnoreByPattern(p) {
+    const codes = document.getElementById('ignore-list').querySelectorAll('code');
+    for (const c of codes) { if (c.textContent.trim()===p) { c.parentElement.querySelector('button').click(); break; } }
+    setTimeout(() => { discoverPlex(); discoverSonarr(); }, 500);
+}
+</script>
+<script>
+// Unsaved changes warning
+(function() {
+    let dirty = false;
+    const form = document.getElementById('settings-form');
+    if (form) {
+        form.addEventListener('input', () => { dirty = true; });
+        form.addEventListener('change', () => { dirty = true; });
+        form.addEventListener('submit', () => { dirty = false; });
+    }
+    window.addEventListener('beforeunload', (e) => {
+        if (dirty) { e.preventDefault(); }
+    });
+})();
+</script>
+{% endblock %}

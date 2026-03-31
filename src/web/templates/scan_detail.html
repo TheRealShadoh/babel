@@ -1,0 +1,455 @@
+{% extends "base.html" %}
+
+{% block title %}Scan #{{ scan.id }}{% endblock %}
+
+{% block extra_head %}
+<style>
+    .back-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-bottom: 1rem;
+        transition: color 0.15s;
+    }
+
+    .back-link:hover {
+        color: var(--accent);
+    }
+
+    .scan-header-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .scan-header-row h1 {
+        font-size: 1.5rem;
+        font-weight: 700;
+    }
+
+    .scan-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.25rem;
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-bottom: 1.5rem;
+    }
+
+    .scan-meta-item {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+    }
+
+    .scan-meta-item svg {
+        width: 14px;
+        height: 14px;
+        color: var(--text-muted);
+        flex-shrink: 0;
+    }
+
+    .scan-meta-item .mono {
+        color: var(--text-secondary);
+        font-size: 0.82rem;
+    }
+
+    /* Stat grid - reuses overview pattern */
+    .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+    }
+
+    @media (max-width: 768px) {
+        .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    @media (max-width: 480px) {
+        .stat-grid { grid-template-columns: 1fr; }
+    }
+
+    .stat-card {
+        background-color: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 1.25rem 1rem;
+        text-align: center;
+        position: relative;
+        overflow: hidden;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .stat-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
+
+    .stat-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+    }
+
+    .stat-card--blue::before { background: var(--blue); }
+    .stat-card--green::before { background: var(--green); }
+    .stat-card--red::before { background: var(--red); }
+    .stat-card--yellow::before { background: var(--yellow); }
+
+    .stat-card--blue { background: linear-gradient(180deg, rgba(129, 140, 248, 0.06) 0%, transparent 60%); }
+    .stat-card--green { background: linear-gradient(180deg, rgba(45, 212, 191, 0.06) 0%, transparent 60%); }
+    .stat-card--red { background: linear-gradient(180deg, rgba(244, 63, 94, 0.06) 0%, transparent 60%); }
+    .stat-card--yellow { background: linear-gradient(180deg, rgba(245, 158, 11, 0.06) 0%, transparent 60%); }
+
+    .stat-card__value {
+        font-family: var(--font-mono);
+        font-size: 2rem;
+        font-weight: 700;
+        line-height: 1.1;
+        margin-bottom: 0.25rem;
+    }
+
+    .stat-card--blue .stat-card__value { color: var(--blue); }
+    .stat-card--green .stat-card__value { color: var(--green); }
+    .stat-card--red .stat-card__value { color: var(--red); }
+    .stat-card--yellow .stat-card__value { color: var(--yellow); }
+
+    .stat-card__label {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    /* Section titles */
+    .section-title {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .section-title svg {
+        flex-shrink: 0;
+        color: var(--text-muted);
+    }
+
+    /* Series breakdown table */
+    .series-row--has-searches {
+        border-left: 2px solid var(--yellow) !important;
+    }
+
+    .series-searched-count {
+        font-family: var(--font-mono);
+        font-weight: 600;
+    }
+
+    /* Filter pills */
+    .filter-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-bottom: 1rem;
+    }
+
+    .filter-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.3rem 0.75rem;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 500;
+        border: 1px solid var(--border-color);
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all 0.15s;
+        user-select: none;
+    }
+
+    .filter-pill:hover {
+        border-color: var(--accent);
+        color: var(--text-secondary);
+    }
+
+    .filter-pill.active {
+        background: var(--accent-dim);
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+    .filter-pill .count {
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        opacity: 0.7;
+    }
+
+    /* Status icons in search table */
+    .status-icon {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.8rem;
+        font-weight: 500;
+    }
+
+    .status-icon--pending { color: var(--blue); }
+    .status-icon--success { color: var(--green); }
+    .status-icon--failed { color: var(--red); }
+    .status-icon--not-found { color: var(--gray); }
+
+    .search-code {
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+        color: var(--text-muted);
+    }
+
+    .search-episode-title {
+        font-size: 0.82rem;
+        color: var(--text-muted);
+    }
+
+    /* Error box */
+    .scan-error-box {
+        margin-top: 0.5rem;
+        padding: 0.75rem 1rem;
+        border-radius: 6px;
+        background: rgba(244, 63, 94, 0.08);
+        border: 1px solid rgba(244, 63, 94, 0.2);
+        font-size: 0.82rem;
+        color: var(--red);
+        font-family: var(--font-mono);
+        line-height: 1.5;
+        word-break: break-word;
+        margin-bottom: 1.25rem;
+    }
+
+    @media (max-width: 640px) {
+        .scan-header-row {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<a href="/history" class="back-link">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="15 18 9 12 15 6"/>
+    </svg>
+    Back to Activity Log
+</a>
+
+<!-- Header -->
+<div class="scan-header-row">
+    <h1>Scan #{{ scan.id }}</h1>
+    {% if scan.status == "completed" %}
+        <span class="badge badge-green">Completed</span>
+    {% elif scan.status == "failed" %}
+        <span class="badge badge-red">Failed</span>
+    {% elif scan.status == "running" %}
+        <span class="badge badge-blue">Running</span>
+    {% else %}
+        <span class="badge badge-gray">{{ scan.status }}</span>
+    {% endif %}
+</div>
+
+<div class="scan-meta">
+    <div class="scan-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+        <span>Started:</span>
+        <span class="mono">{{ scan.started_at }}</span>
+    </div>
+    {% if scan.completed_at %}
+    <div class="scan-meta-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/>
+        </svg>
+        <span>Ended:</span>
+        <span class="mono">{{ scan.completed_at }}</span>
+    </div>
+    {% endif %}
+</div>
+
+{% if scan.error_message %}
+<div class="scan-error-box">{{ scan.error_message }}</div>
+{% endif %}
+
+<!-- Summary cards -->
+<div class="stat-grid">
+    <div class="stat-card stat-card--blue">
+        <div class="stat-card__value">{{ scan.episodes_checked }}</div>
+        <div class="stat-card__label">Episodes Checked</div>
+    </div>
+    <div class="stat-card stat-card--yellow">
+        <div class="stat-card__value">{{ scan.searches_triggered }}</div>
+        <div class="stat-card__label">Searches Triggered</div>
+    </div>
+    <div class="stat-card stat-card--green">
+        <div class="stat-card__value">{{ searches | selectattr("status", "equalto", "SUCCESS") | list | length }}</div>
+        <div class="stat-card__label">Upgraded</div>
+    </div>
+    <div class="stat-card stat-card--red">
+        <div class="stat-card__value">{{ scan.errors }}</div>
+        <div class="stat-card__label">Errors</div>
+    </div>
+</div>
+
+<!-- Series Breakdown -->
+{% if series_summary %}
+<div class="card">
+    <div class="section-title">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+            <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+        </svg>
+        Series Breakdown
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Series</th>
+                <th>Dubbed</th>
+                <th>Sub-Only</th>
+                <th>Searches</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in series_summary %}
+            <tr class="{{ 'series-row--has-searches' if s.searched > 0 }}">
+                <td style="font-weight:500;">{{ s.title }}</td>
+                <td><span class="text-green">{{ s.dubbed }}</span></td>
+                <td><span class="text-red">{{ s.sub_only }}</span></td>
+                <td>
+                    <span class="series-searched-count {{ 'text-yellow' if s.searched > 0 else 'text-muted' }}">
+                        {{ s.searched }}
+                    </span>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<!-- Episode Search Results -->
+<div class="card">
+    <div class="section-title">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        Episode Search Results
+    </div>
+
+    {% if searches %}
+    {% set pending_count = searches | selectattr("status", "equalto", "PENDING") | list | length %}
+    {% set success_count = searches | selectattr("status", "equalto", "SUCCESS") | list | length %}
+    {% set failed_count = searches | selectattr("status", "equalto", "FAILED") | list | length %}
+    {% set not_found_count = searches | selectattr("status", "equalto", "NOT_FOUND") | list | length %}
+
+    <div class="filter-bar">
+        <span class="filter-pill active" data-filter="all">
+            All <span class="count">({{ searches | length }})</span>
+        </span>
+        {% if pending_count > 0 %}
+        <span class="filter-pill" data-filter="PENDING">
+            Pending <span class="count">({{ pending_count }})</span>
+        </span>
+        {% endif %}
+        {% if success_count > 0 %}
+        <span class="filter-pill" data-filter="SUCCESS">
+            Success <span class="count">({{ success_count }})</span>
+        </span>
+        {% endif %}
+        {% if failed_count > 0 %}
+        <span class="filter-pill" data-filter="FAILED">
+            Failed <span class="count">({{ failed_count }})</span>
+        </span>
+        {% endif %}
+        {% if not_found_count > 0 %}
+        <span class="filter-pill" data-filter="NOT_FOUND">
+            Not Found <span class="count">({{ not_found_count }})</span>
+        </span>
+        {% endif %}
+    </div>
+
+    <table id="search-table">
+        <thead>
+            <tr>
+                <th>Series</th>
+                <th>Episode</th>
+                <th>Title</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in searches %}
+            <tr data-status="{{ s.status }}">
+                <td style="font-weight:500;">{{ s.series_title }}</td>
+                <td><span class="search-code">{{ s.episode_code }}</span></td>
+                <td><span class="search-episode-title">{{ s.episode_title or "—" }}</span></td>
+                <td>
+                    {% if s.status == "PENDING" %}
+                        <span class="status-icon status-icon--pending">&#128269; Pending</span>
+                    {% elif s.status == "SUCCESS" %}
+                        <span class="status-icon status-icon--success">&#9989; Upgraded</span>
+                    {% elif s.status == "FAILED" %}
+                        <span class="status-icon status-icon--failed">&#10060; Failed</span>
+                    {% else %}
+                        <span class="status-icon status-icon--not-found">&#9203; Not Found</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--text-muted); margin-bottom: 0.75rem;">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <p>No searches were triggered during this scan.</p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const pills = document.querySelectorAll('.filter-pill');
+    const rows = document.querySelectorAll('#search-table tbody tr');
+
+    pills.forEach(function(pill) {
+        pill.addEventListener('click', function() {
+            pills.forEach(function(p) { p.classList.remove('active'); });
+            pill.classList.add('active');
+
+            var filter = pill.getAttribute('data-filter');
+            rows.forEach(function(row) {
+                if (filter === 'all' || row.getAttribute('data-status') === filter) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,21 @@
+services:
+  babel:
+    build: .
+    container_name: babel
+    ports:
+      - "8686:8686"
+    volumes:
+      - babel-data:/app/data
+      # Mount media for ffprobe fallback
+      # - /mnt/user/media:/media:ro
+    environment:
+      - SONARR_URL=http://localhost:8989
+      - SONARR_API_KEY=
+      - PLEX_URL=http://localhost:32400
+      - PLEX_TOKEN=
+      - SCAN_INTERVAL_HOURS=6
+      - TARGET_LANGUAGE=eng
+    restart: unless-stopped
+
+volumes:
+  babel-data:

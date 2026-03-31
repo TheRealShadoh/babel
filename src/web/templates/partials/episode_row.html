@@ -1,0 +1,37 @@
+<tr>
+    <td>{{ episode.season_number }}</td>
+    <td>{{ episode.episode_number }}</td>
+    <td>{{ episode.title or "—" }}</td>
+    <td>
+        {% if episode.audio_tracks %}
+            <span class="text-muted" style="font-size: 0.85rem;">{{ episode.audio_tracks | join(", ") }}</span>
+        {% else %}
+            <span class="text-muted">—</span>
+        {% endif %}
+    </td>
+    <td>
+        {% if episode.dub_status == "DUBBED" %}
+            <span class="badge badge-green">Dubbed</span>
+        {% elif episode.dub_status == "SUB_ONLY" %}
+            <span class="badge badge-red">Sub Only</span>
+        {% else %}
+            <span class="badge badge-gray">Unknown</span>
+        {% endif %}
+    </td>
+    <td>
+        <span class="text-muted" style="font-size: 0.85rem;">
+            {{ episode.last_searched or "Never" }}
+        </span>
+    </td>
+    <td>
+        {% if episode.dub_status == "SUB_ONLY" %}
+            <button class="btn btn-sm btn-success"
+                    hx-post="/api/search/{{ episode.id }}"
+                    hx-target="closest tr"
+                    hx-swap="outerHTML">
+                <span class="htmx-indicator"><span class="spinner"></span></span>
+                Search
+            </button>
+        {% endif %}
+    </td>
+</tr>

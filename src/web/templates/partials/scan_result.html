@@ -1,0 +1,28 @@
+{% if status == "started" %}
+<div class="flash" style="background-color: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.25); color: var(--blue); display: flex; align-items: center; gap: 0.5rem;">
+    <span class="spinner" style="border-color: rgba(59, 130, 246, 0.3); border-top-color: var(--blue); width: 14px; height: 14px; flex-shrink: 0;"></span>
+    {{ message }}
+</div>
+{% elif status == "completed" %}
+<div class="flash" style="background-color: rgba(45, 212, 191, 0.1); border: 1px solid rgba(45, 212, 191, 0.25); color: var(--green); display: flex; align-items: center; gap: 0.5rem;">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+        <polyline points="22 4 12 14.01 9 11.01"/>
+    </svg>
+    <span>
+        Scan completed: {{ episodes_checked }} episodes checked, {{ searches_triggered }} searches triggered.
+        {% if errors %}
+        <br><span style="font-size: 0.85rem; opacity: 0.85;">{{ errors }} error(s) encountered.</span>
+        {% endif %}
+    </span>
+</div>
+{% else %}
+<div class="flash" style="background-color: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.25); color: var(--red); display: flex; align-items: center; gap: 0.5rem;">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+        <line x1="12" y1="9" x2="12" y2="13"/>
+        <line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+    {{ error or reason or message or "Unknown error" }}
+</div>
+{% endif %}

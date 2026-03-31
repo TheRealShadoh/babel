@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<Container version="2">
+    <Name>Babel</Name>
+    <Repository>therealshadoh/babel</Repository>
+    <Registry>https://hub.docker.com/r/therealshadoh/babel</Registry>
+    <Network>bridge</Network>
+    <Privileged>false</Privileged>
+    <Support>https://github.com/TheRealShadoh/babel/issues</Support>
+    <Project>https://github.com/TheRealShadoh/babel</Project>
+    <Overview>Babel - Media Dub Detection and Upgrade Tool. Monitors your media library via Sonarr and Plex, detects sub-only episodes, and automatically searches for English dubbed versions. Features include automatic Sonarr searching, upgrade tracking, dub availability lookup via MyAnimeList, Plex collection management, Discord notifications, and a polished web dashboard.</Overview>
+    <Category>MediaApp:Other</Category>
+    <WebUI>http://[IP]:[PORT:8686]</WebUI>
+    <Icon>https://raw.githubusercontent.com/TheRealShadoh/babel/master/icon.png</Icon>
+    <ExtraParams/>
+    <DateInstalled></DateInstalled>
+    <Config Name="Web UI Port" Target="8686" Default="8686" Mode="tcp" Description="Web interface port" Type="Port" Display="always" Required="true" Mask="false">8686</Config>
+    <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/babel" Mode="rw" Description="Application data (database)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/babel</Config>
+    <Config Name="Media" Target="/media" Default="/mnt/user/media" Mode="ro" Description="Media files (optional, for ffprobe fallback)" Type="Path" Display="always" Required="false" Mask="false">/mnt/user/media</Config>
+    <Config Name="Sonarr URL" Target="SONARR_URL" Default="http://localhost:8989" Mode="" Description="Sonarr server URL" Type="Variable" Display="always" Required="false" Mask="false">http://localhost:8989</Config>
+    <Config Name="Sonarr API Key" Target="SONARR_API_KEY" Default="" Mode="" Description="Sonarr API key (Settings &gt; General)" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+    <Config Name="Plex URL" Target="PLEX_URL" Default="http://localhost:32400" Mode="" Description="Plex server URL" Type="Variable" Display="always" Required="false" Mask="false">http://localhost:32400</Config>
+    <Config Name="Plex Token" Target="PLEX_TOKEN" Default="" Mode="" Description="Plex authentication token" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+    <Config Name="Scan Interval" Target="SCAN_INTERVAL_HOURS" Default="6" Mode="" Description="Hours between scans" Type="Variable" Display="always" Required="false" Mask="false">6</Config>
+    <Config Name="Target Language" Target="TARGET_LANGUAGE" Default="eng" Mode="" Description="ISO 639-2 language code to search for" Type="Variable" Display="always" Required="false" Mask="false">eng</Config>
+    <Config Name="Discord Webhook" Target="DISCORD_WEBHOOK_URL" Default="" Mode="" Description="Discord webhook URL for notifications (optional)" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+</Container>

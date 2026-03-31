@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="towerGrad" x1="256" y1="20" x2="256" y2="460" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#a855f7"/>
+      <stop offset="100%" stop-color="#2dd4bf"/>
+    </linearGradient>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1a1035"/>
+      <stop offset="100%" stop-color="#0d1117"/>
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="512" height="512" rx="96" fill="url(#bgGrad)"/>
+  <!-- Tower: stacked trapezoid sections with gaps, matching main page -->
+  <!-- Spire -->
+  <polygon points="256,50 280,120 232,120" fill="url(#towerGrad)"/>
+  <!-- Section 1 -->
+  <polygon points="228,132 284,132 296,190 216,190" fill="url(#towerGrad)"/>
+  <!-- Section 2 -->
+  <polygon points="210,202 302,202 320,270 192,270" fill="url(#towerGrad)"/>
+  <!-- Section 3 -->
+  <polygon points="186,282 326,282 350,360 162,360" fill="url(#towerGrad)"/>
+  <!-- Section 4 / base -->
+  <polygon points="156,372 356,372 380,440 132,440" fill="url(#towerGrad)"/>
+  <!-- Base platform -->
+  <rect x="116" y="450" width="280" height="16" rx="4" fill="url(#towerGrad)" opacity="0.5"/>
+  <!-- Sound wave accents -->
+  <path d="M160,250 Q130,240 135,210" stroke="#a855f7" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.4"/>
+  <path d="M140,270 Q100,250 110,210" stroke="#a855f7" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.25"/>
+  <path d="M352,250 Q382,240 377,210" stroke="#2dd4bf" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.4"/>
+  <path d="M372,270 Q412,250 402,210" stroke="#2dd4bf" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.25"/>
+</svg>
