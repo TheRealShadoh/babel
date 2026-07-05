@@ -92,7 +92,7 @@ All settings can be configured via environment variables or the web UI Settings 
 
 | Variable | Default | Description |
 |---|---|---|
-| `SONARR_URL` | *(required)* | Sonarr server URL |
+| `SONARR_URL` | | Sonarr server URL (optional — Babel can run Plex-only) |
 | `SONARR_API_KEY` | | Sonarr API key (Settings > General) |
 | `PLEX_URL` | | Plex server URL |
 | `PLEX_TOKEN` | | Plex authentication token |
@@ -101,6 +101,23 @@ All settings can be configured via environment variables or the web UI Settings 
 | `SEARCH_COOLDOWN_DAYS` | `7` | Days before re-searching an episode |
 | `SEARCH_RATE_LIMIT` | `5` | Max Sonarr searches per minute |
 | `DISCORD_WEBHOOK_URL` | | Discord webhook for notifications |
+| `WEBHOOK_SECRET` | | If set, the Sonarr webhook requires `?apikey=` (or `X-Api-Key` header) to match |
+| `AUTH_USERNAME` / `AUTH_PASSWORD` | | If both are set, the whole dashboard requires HTTP Basic Auth |
+| `PUID` / `PGID` | `1000` / `1000` | UID/GID the container runs as — match your host's media/data ownership |
+
+### Security
+
+Babel has no built-in accounts and, by default, no authentication — anyone who
+can reach the port can view and change settings (including your Sonarr API
+key and Plex token). For anything beyond a trusted home LAN, do one of:
+
+- Set `AUTH_USERNAME` + `AUTH_PASSWORD` to put the dashboard behind HTTP Basic Auth, or
+- Put Babel behind a reverse proxy (Caddy, Traefik, Nginx Proxy Manager, etc.)
+  that handles authentication.
+
+`GET /api/health` and `POST /api/webhook/sonarr` are always reachable without
+Basic Auth credentials (health checks and Sonarr can't complete an interactive
+login) — set `WEBHOOK_SECRET` to authenticate the webhook instead.
 
 ### Sonarr Webhook (Recommended)
 
@@ -108,7 +125,8 @@ For instant upgrade detection instead of waiting for scan cycles:
 
 1. In Sonarr, go to **Settings > Connect > + > Webhook**
 2. **Name:** Babel
-3. **URL:** `http://your-babel-container:8686/api/webhook/sonarr`
+3. **URL:** `http://your-babel-container:8686/api/webhook/sonarr` (append
+   `?apikey=your-secret` if `WEBHOOK_SECRET` is set)
 4. **Events:** Enable *On Import* and *On Upgrade*
 5. Click **Save**
 
@@ -125,10 +143,12 @@ For instant upgrade detection instead of waiting for scan cycles:
 ```
 Scan Cycle:
   Sonarr ──> Fetch anime series + episodes
-  Plex ────> Build audio track index
   │
   For each episode:
-    ├── Check audio tracks (Plex → ffprobe fallback)
+    ├── Check DB cache — unchanged files skip straight to their known status
+    ├── Otherwise check audio tracks (Plex → ffprobe fallback; Plex's
+    │   library index is only built the first time a scan actually needs
+    │   it, so a cycle where nothing changed never touches Plex at all)
     ├── Classify: DUBBED / SUB_ONLY / MISSING
     └── If SUB_ONLY → trigger Sonarr search
   │
@@ -139,7 +159,10 @@ Scan Cycle:
     └── Send Discord notifications
 
 Webhook (real-time):
-  Sonarr import event → re-check audio → resolve upgrade
+  Sonarr import event → re-check audio via ffprobe → resolve upgrade
+
+Note: Sonarr is optional — with only Plex configured, Babel runs in a
+read-only "Plex-only" mode (detection and collections, no searches).
 ```
 
 ## API
@@ -149,10 +172,20 @@ Webhook (real-time):
 | `GET /api/health` | System status, version, stats |
 | `GET /api/activity` | Live download queue + recent upgrades |
 | `POST /api/scan` | Trigger manual scan |
-| `POST /api/webhook/sonarr` | Sonarr webhook receiver |
+| `POST /api/scan/stop` | Cancel the running scan after the current series |
+| `POST /api/webhook/sonarr` | Sonarr webhook receiver (`?apikey=` if `WEBHOOK_SECRET` is set) |
 | `POST /api/check-downloads` | Check pending upgrade status |
 | `POST /api/resolve-imports` | Fix stuck Sonarr imports |
 | `POST /api/lookup-dubs` | Run MAL dub availability check |
+| `POST /api/setup-sonarr-dub` | Create/assign a Sonarr custom format that prefers dual-audio releases |
+
+## Data & Backups
+
+Everything Babel needs to keep is under `/app/data` (the `babel-data` volume
+in the Quick Start example): the SQLite database (`babel.db`) and rotating
+application logs (`babel.log*`). Back up that volume to preserve scan
+history, upgrade tracking, and settings saved via the web UI — the container
+itself is stateless otherwise.
 
 ## Links
 

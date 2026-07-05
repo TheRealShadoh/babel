@@ -2,8 +2,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
-from src.config import get_settings
+from src.config import get_effective_settings, get_settings
 from src.scanner.engine import run_scan
 
 logger = logging.getLogger(__name__)
@@ -28,13 +29,16 @@ async def _safe_run_dub_lookup() -> None:
         logger.exception("Scheduled dub lookup failed")
 
 
-def start_scheduler() -> None:
-    settings = get_settings()
+async def start_scheduler() -> None:
+    # Use effective settings (env + DB overrides) so a scan interval configured
+    # via the web UI takes effect without requiring a container restart.
+    cfg = await get_effective_settings()
+    interval_hours = int(cfg.get("SCAN_INTERVAL_HOURS", get_settings().SCAN_INTERVAL_HOURS))
 
     scheduler.add_job(
         _safe_run_scan,
         trigger="interval",
-        hours=settings.SCAN_INTERVAL_HOURS,
+        hours=interval_hours,
         id="periodic_scan",
         replace_existing=True,
         jitter=60,
@@ -60,12 +64,28 @@ def start_scheduler() -> None:
     )
 
     scheduler.start()
-    logger.info("Scheduler started - scans every %sh, dub lookup daily", settings.SCAN_INTERVAL_HOURS)
+    logger.info("Scheduler started - scans every %sh, dub lookup daily", interval_hours)
 
 
 def stop_scheduler() -> None:
     scheduler.shutdown(wait=False)
     logger.info("Scheduler stopped")
+
+
+def reschedule_scan(interval_hours: int) -> None:
+    """Update the periodic scan job's interval without restarting the process.
+
+    Called when SCAN_INTERVAL_HOURS is changed via the Settings page.
+    """
+    if not scheduler.running:
+        return
+    job = scheduler.get_job("periodic_scan")
+    if job is None:
+        return
+    scheduler.reschedule_job(
+        "periodic_scan", trigger=IntervalTrigger(hours=interval_hours, jitter=60)
+    )
+    logger.info("Scan interval updated to every %sh", interval_hours)
 
 
 def get_next_run_time() -> str | None:

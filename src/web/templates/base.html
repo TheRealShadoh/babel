@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Babel{% endblock %} — Media Dub Monitor</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='16' y1='1' x2='16' y2='30' gradientUnits='userSpaceOnUse'><stop offset='0%25' stop-color='%23a855f7'/><stop offset='100%25' stop-color='%232dd4bf'/></linearGradient></defs><polygon points='16,1 18.5,7 13.5,7' fill='url(%23g)'/><polygon points='13.5,8.5 18.5,8.5 19.5,13 12.5,13' fill='url(%23g)'/><polygon points='12,14.5 20,14.5 21.5,19.5 10.5,19.5' fill='url(%23g)'/><polygon points='10,21 22,21 24,26.5 8,26.5' fill='url(%23g)'/><rect x='6' y='27.5' width='20' height='2' rx='0.5' fill='url(%23g)' opacity='0.5'/></svg>">
-    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script src="/static/htmx.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -607,7 +607,7 @@
             <polygon points="10,21 22,21 24,26.5 8,26.5" fill="#8b95a5" opacity="0.5"/>
             <rect x="6" y="27.5" width="20" height="2" rx="0.5" fill="#8b95a5" opacity="0.3"/>
         </svg>
-        Babel v1.1.0 &mdash; Media Dub Monitor
+        Babel v{{ babel_version }} &mdash; Media Dub Monitor
     </footer>
 <script>
 function timeAgo(dateStr) {

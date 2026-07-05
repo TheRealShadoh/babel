@@ -7,12 +7,12 @@ import logging
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from markupsafe import escape as esc
 
-from src.config import get_settings, get_effective_settings
+from src.config import get_settings, get_effective_settings, translate_path, cfg_bool
 from src.db.database import get_db
 from src.db import models
 from src.scanner.engine import run_scan, check_download_status, resolve_stuck_imports
-from src.scanner.dub_lookup import lookup_dub_info, bulk_lookup
 from src.scanner.sonarr import SonarrClient
 from src.scanner.plex import PlexClient
 from src.scheduler import get_next_run_time
@@ -45,6 +45,7 @@ SETTING_KEYS = (
     "DISCORD_WEBHOOK_URL",
     "AUTO_COLLECTIONS_PLEX",
     "AUTO_RESOLVE_IMPORTS",
+    "STUCK_IMPORT_DRY_RUN",
     "WEBHOOK_SECRET",
 )
 
@@ -55,13 +56,20 @@ def _templates(request: Request):
 
 
 def _build_sonarr_url(base_url: str, series: dict) -> str | None:
-    """Build a Sonarr series page URL from the series path."""
-    import re
-    if not base_url or not series.get("sonarr_path"):
+    """Build a Sonarr series page URL.
+
+    Prefers Sonarr's own titleSlug (captured at scan time); older rows
+    scanned before that column existed fall back to a folder-name guess.
+    """
+    if not base_url or series.get("id", 0) <= 0:
         return None
-    # Use the folder name as a slug approximation
-    folder = series["sonarr_path"].rstrip("/").split("/")[-1]
-    slug = re.sub(r"[^a-z0-9]+", "-", folder.lower()).strip("-")
+    slug = series.get("title_slug")
+    if not slug:
+        if not series.get("sonarr_path"):
+            return None
+        import re
+        folder = series["sonarr_path"].rstrip("/").split("/")[-1]
+        slug = re.sub(r"[^a-z0-9]+", "-", folder.lower()).strip("-")
     return f"{base_url.rstrip('/')}/series/{slug}"
 
 
@@ -130,7 +138,7 @@ async def series_list(request: Request):
         show_thumbs_val = await models.get_setting(db, "SHOW_THUMBNAILS")
     finally:
         await db.close()
-    show_thumbnails = show_thumbs_val != "false"  # default true
+    show_thumbnails = cfg_bool(show_thumbs_val)
 
     total_pages = max(1, math.ceil(total_count / per_page))
     # Clamp page to valid range
@@ -155,6 +163,7 @@ async def series_list(request: Request):
 
 @router.get("/series/{series_id}")
 async def series_detail(request: Request, series_id: int):
+    cfg = await get_effective_settings()
     settings = get_settings()
     db = await get_db(settings.DB_PATH)
     try:
@@ -180,7 +189,7 @@ async def series_detail(request: Request, series_id: int):
         request,
         "series_detail.html",
         {"series": series, "episodes": episodes, "excluded": excluded,
-         "sonarr_url": _build_sonarr_url(settings.SONARR_URL, series) if series["id"] > 0 else None},
+         "sonarr_url": _build_sonarr_url(cfg.get("SONARR_URL", ""), series)},
     )
 
 
@@ -371,6 +380,12 @@ async def resolve_imports(request: Request):
 @router.post("/api/search/{episode_id}")
 async def search_episode(request: Request, episode_id: int):
     cfg = await get_effective_settings()
+    if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
+        return _templates(request).TemplateResponse(
+            request,
+            "partials/episode_row.html",
+            {"episode_id": episode_id, "success": False, "message": "Sonarr is not configured."},
+        )
     sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
     db = await get_db(cfg.get("DB_PATH", get_settings().DB_PATH))
     try:
@@ -397,30 +412,36 @@ async def search_episode(request: Request, episode_id: int):
 
 @router.post("/api/search-all/{series_id}")
 async def search_all_sub_only(request: Request, series_id: int):
+    """Search all sub-only episodes for a series.
+
+    Sonarr's EpisodeSearch command accepts a batch of episode IDs and searches
+    them all in one call, so there's no need to loop with per-episode delays
+    (that previously held the HTTP request open for minutes on large series).
+    """
     cfg = await get_effective_settings()
+    if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
+        return HTMLResponse('<span style="color:var(--red);">Sonarr is not configured.</span>')
+
     sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
     db = await get_db(cfg.get("DB_PATH", get_settings().DB_PATH))
     triggered = 0
     errors = 0
     try:
         episodes = await models.get_episodes_for_series(db, series_id)
-        sub_only = [ep for ep in episodes if ep["dub_status"] == "SUB_ONLY"]
+        sub_only_ids = [ep["id"] for ep in episodes if ep["dub_status"] == "SUB_ONLY"]
 
-        for ep in sub_only:
+        if sub_only_ids:
             try:
-                success = await sonarr.search_episodes([ep["id"]])
+                success = await sonarr.search_episodes(sub_only_ids)
                 if success:
-                    await models.add_search_record(
-                        db, ep["id"], trigger_source="manual_bulk"
-                    )
-                    triggered += 1
+                    for ep_id in sub_only_ids:
+                        await models.add_search_record(db, ep_id, trigger_source="manual_bulk")
+                    triggered = len(sub_only_ids)
                 else:
-                    errors += 1
-                # Rate limit between searches
-                await asyncio.sleep(60.0 / max(int(cfg.get("SEARCH_RATE_LIMIT", 5)), 1))
+                    errors = len(sub_only_ids)
             except Exception:
-                logger.exception("Bulk search failed for episode %d", ep["id"])
-                errors += 1
+                logger.exception("Bulk search failed for series %d", series_id)
+                errors = len(sub_only_ids)
     finally:
         await sonarr.close()
         await db.close()
@@ -503,6 +524,8 @@ async def test_sonarr(request: Request):
             await models.set_setting(db, "SONARR_API_KEY", api_key)
         finally:
             await db.close()
+        from src.config import invalidate_effective_settings_cache
+        invalidate_effective_settings_cache()
         message += " (saved)"
 
     color = "#2dd4bf" if ok else "#f43f5e"
@@ -538,6 +561,8 @@ async def test_plex(request: Request):
             await models.set_setting(db, "PLEX_TOKEN", token)
         finally:
             await db.close()
+        from src.config import invalidate_effective_settings_cache
+        invalidate_effective_settings_cache()
         message += " (saved)"
 
     color = "#2dd4bf" if ok else "#f43f5e"
@@ -548,6 +573,8 @@ async def test_plex(request: Request):
 async def setup_sonarr_dub(request: Request):
     """Auto-configure Sonarr to prefer dubbed releases."""
     cfg = await get_effective_settings()
+    if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
+        return HTMLResponse('<span style="color:#e17055">Sonarr is not configured.</span>')
     sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
     try:
         result = await sonarr.ensure_dub_preference()
@@ -555,17 +582,17 @@ async def setup_sonarr_dub(request: Request):
         await sonarr.close()
 
     if result.get("error"):
-        return HTMLResponse(f'<span style="color:#e17055">Error: {result["error"]}</span>')
+        return HTMLResponse(f'<span style="color:#e17055">Error: {esc(result["error"])}</span>')
 
     parts = []
     if result["format_created"]:
-        parts.append(f'Created custom format: {result["format_name"]}')
+        parts.append(f'Created custom format: {esc(result["format_name"])}')
     else:
-        parts.append(f'Custom format already exists: {result["format_name"]}')
+        parts.append(f'Custom format already exists: {esc(result["format_name"])}')
     if result["profiles_updated"]:
-        parts.append(f'Updated profiles: {", ".join(result["profiles_updated"])}')
+        parts.append(f'Updated profiles: {esc(", ".join(result["profiles_updated"]))}')
     if result["profiles_already_configured"]:
-        parts.append(f'Already configured: {", ".join(result["profiles_already_configured"])}')
+        parts.append(f'Already configured: {esc(", ".join(result["profiles_already_configured"]))}')
 
     return HTMLResponse(f'<span style="color:#00b894">{"<br>".join(parts)}</span>')
 
@@ -578,7 +605,7 @@ async def save_settings(request: Request):
     try:
         for key in SETTING_KEYS:
             value = form.get(key)
-            if key in ("SHOW_THUMBNAILS", "AUTO_TAG_SONARR", "AUTO_COLLECTIONS_PLEX", "AUTO_RESOLVE_IMPORTS"):
+            if key in ("SHOW_THUMBNAILS", "AUTO_TAG_SONARR", "AUTO_COLLECTIONS_PLEX", "AUTO_RESOLVE_IMPORTS", "STUCK_IMPORT_DRY_RUN"):
                 # Checkbox: present = "true", absent = "false"
                 await models.set_setting(db, key, "true" if value else "false")
             elif value is not None:
@@ -587,6 +614,17 @@ async def save_settings(request: Request):
         logger.exception("Failed to save settings")
     finally:
         await db.close()
+
+    from src.config import invalidate_effective_settings_cache
+    invalidate_effective_settings_cache()
+
+    interval_value = form.get("SCAN_INTERVAL_HOURS")
+    if interval_value:
+        try:
+            from src.scheduler import reschedule_scan
+            reschedule_scan(int(interval_value))
+        except (ValueError, TypeError):
+            logger.warning("Invalid SCAN_INTERVAL_HOURS value: %r", interval_value)
 
     return RedirectResponse(url="/settings?saved=1", status_code=303)
 
@@ -631,8 +669,8 @@ def _render_ignore_list(paths: list[dict]) -> HTMLResponse:
     for p in paths:
         rows.append(
             f'<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0;border-bottom:1px solid var(--border-color);">'
-            f'<code style="flex:1;font-size:0.82rem;color:var(--text-primary);">{p["pattern"]}</code>'
-            f'<span style="font-size:0.75rem;color:var(--text-muted);">{p.get("note") or ""}</span>'
+            f'<code style="flex:1;font-size:0.82rem;color:var(--text-primary);">{esc(p["pattern"])}</code>'
+            f'<span style="font-size:0.75rem;color:var(--text-muted);">{esc(p.get("note") or "")}</span>'
             f'<button class="btn btn-sm" style="background:rgba(244,63,94,0.15);color:var(--red);border:1px solid rgba(244,63,94,0.3);padding:0.2rem 0.5rem;font-size:0.72rem;" '
             f'hx-post="/api/ignore-path/remove/{p["id"]}" hx-target="#ignore-list" hx-swap="innerHTML" '
             f'hx-confirm="Remove this pattern?">Remove</button>'
@@ -738,7 +776,6 @@ async def scan_progress(request: Request):
         else:
             detail = p.get("last_log", "Building audio track index...")
     elif p["phase"] == "scanning":
-        pct = int(p["series_index"] / p["series_total"] * 100) if p["series_total"] else 0
         status_html = f'<span class="badge badge-blue" style="margin-right:0.4rem;">{p["series_index"]}/{p["series_total"]}</span>'
         detail = p.get("last_log", p["current_series"])
     else:
@@ -755,7 +792,7 @@ async def scan_progress(request: Request):
         <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
             <span class="spinner" style="width:14px;height:14px;border-width:2px;flex-shrink:0;"></span>
             {status_html}
-            <span style="font-size:0.82rem;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{detail}</span>
+            <span style="font-size:0.82rem;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{esc(detail)}</span>
         </div>
         <div style="width:100%;height:4px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;margin-bottom:0.5rem;">
             <div style="height:100%;width:{bar_pct}%;background:linear-gradient(90deg,var(--accent),var(--green));border-radius:2px;transition:width 0.3s ease;"></div>
@@ -776,99 +813,101 @@ async def activity_page(request: Request):
     return _templates(request).TemplateResponse(request, "activity.html", {})
 
 
+async def _build_activity_data(sonarr, db) -> dict:
+    """Shared queue/recent-upgrades assembly used by both the JSON and HTML
+    activity endpoints — previously duplicated ~90 lines between them."""
+    from datetime import datetime, timezone
+
+    queue_items = await sonarr.get_queue()
+    pending_ids = await models.get_pending_episode_ids(db)
+    upgrade_stats = await models.get_upgrade_stats(db)
+
+    relevant_items = [i for i in queue_items if i.get("episodeId") in pending_ids]
+    series_ids = {i["seriesId"] for i in relevant_items if i.get("seriesId")}
+    poster_urls = await models.get_poster_urls_for_series(db, series_ids)
+
+    queue = []
+    counts = {"downloading": 0, "completed": 0, "warning": 0}
+    for item in relevant_items:
+        size_total = item.get("size", 0) or 0
+        size_left = item.get("sizeleft", 0) or 0
+        progress = int((1 - size_left / size_total) * 100) if size_total > 0 else 0
+
+        state = (item.get("trackedDownloadState") or "").lower()
+        status_val = (item.get("trackedDownloadStatus") or "").lower()
+        status_msgs = item.get("statusMessages") or []
+
+        if status_val in ("warning", "error"):
+            cat = "warning"
+        elif state == "importpending" or progress >= 100:
+            cat = "completed"
+        else:
+            cat = "downloading"
+
+        counts[cat] += 1
+
+        warning_msg = ""
+        if status_msgs:
+            msgs = []
+            for sm in status_msgs:
+                for m in sm.get("messages", []):
+                    msgs.append(m)
+            warning_msg = " | ".join(msgs)
+
+        queue.append({
+            "title": item.get("title", ""),
+            "series": (item.get("series", {}) or {}).get("title", ""),
+            "episode": _fmt_episode(item),
+            "status": cat,
+            "progress": min(progress, 100),
+            "size": _fmt_bytes(size_total),
+            "downloaded": _fmt_bytes(size_total - size_left),
+            "eta": item.get("timeleft") or "",
+            "message": warning_msg,
+            "poster_url": poster_urls.get(item.get("seriesId")),
+        })
+
+    # Sort: downloading first (by progress desc), then completed, then warning
+    order = {"downloading": 0, "completed": 1, "warning": 2}
+    queue.sort(key=lambda x: (order.get(x["status"], 9), -x["progress"]))
+
+    recent_rows = await models.get_recent_resolved_upgrades(db, limit=20)
+    now = datetime.now(timezone.utc)
+    recent = []
+    for r in recent_rows:
+        resolved_at = r.get("resolved_at", "")
+        when_str = _time_ago(resolved_at, now) if resolved_at else ""
+        recent.append({
+            "series": r.get("series_title", ""),
+            "episode": f"S{r.get('season_number', 0) or 0:02d}E{r.get('episode_number', 0) or 0:02d}",
+            "result": r.get("result", ""),
+            "when": when_str,
+        })
+
+    return {"queue": queue, "recent": recent, "counts": counts, "upgrade_stats": upgrade_stats}
+
+
 @router.get("/api/activity")
 async def get_activity(request: Request):
     """Get live activity data — Sonarr queue + recent upgrade events."""
-    from datetime import datetime, timezone
-
     cfg = await get_effective_settings()
+    if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
+        return JSONResponse({"queue": [], "recent": [], "stats": {"downloading": 0, "completed": 0, "warning": 0, "pending_total": 0}})
     sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
     settings = get_settings()
     db = await get_db(settings.DB_PATH)
 
     try:
-        # 1. Get Sonarr queue and Babel-tracked episode IDs
-        queue_items = await sonarr.get_queue()
-        pending_ids = await models.get_pending_episode_ids(db)
-        upgrade_stats = await models.get_upgrade_stats(db)
-
-        # 2. Filter queue to Babel-tracked and categorize
-        queue = []
-        counts = {"downloading": 0, "completed": 0, "warning": 0}
-        for item in queue_items:
-            ep_id = item.get("episodeId")
-            if ep_id not in pending_ids:
-                continue
-
-            size_total = item.get("size", 0) or 0
-            size_left = item.get("sizeleft", 0) or 0
-            progress = int((1 - size_left / size_total) * 100) if size_total > 0 else 0
-
-            state = (item.get("trackedDownloadState") or "").lower()
-            status_val = (item.get("trackedDownloadStatus") or "").lower()
-            status_msgs = item.get("statusMessages") or []
-
-            if status_val in ("warning", "error"):
-                cat = "warning"
-            elif state == "importpending" or progress >= 100:
-                cat = "completed"
-            else:
-                cat = "downloading"
-
-            counts[cat] += 1
-
-            # Format sizes
-            size_str = _fmt_bytes(size_total)
-            downloaded_str = _fmt_bytes(size_total - size_left)
-
-            # Build warning message if applicable
-            warning_msg = ""
-            if status_msgs:
-                msgs = []
-                for sm in status_msgs:
-                    for m in sm.get("messages", []):
-                        msgs.append(m)
-                warning_msg = " | ".join(msgs)
-
-            entry = {
-                "title": item.get("title", ""),
-                "series": (item.get("series", {}) or {}).get("title", ""),
-                "episode": _fmt_episode(item),
-                "status": cat,
-                "progress": min(progress, 100),
-                "size": size_str,
-                "downloaded": downloaded_str,
-                "eta": item.get("timeleft") or "",
-                "message": warning_msg,
-            }
-            queue.append(entry)
-
-        # Sort: downloading first (by progress desc), then completed, then warning
-        order = {"downloading": 0, "completed": 1, "warning": 2}
-        queue.sort(key=lambda x: (order.get(x["status"], 9), -x["progress"]))
-
-        # 3. Recent resolved upgrades
-        recent_rows = await models.get_recent_resolved_upgrades(db, limit=20)
-        now = datetime.now(timezone.utc)
-        recent = []
-        for r in recent_rows:
-            resolved_at = r.get("resolved_at", "")
-            when_str = _time_ago(resolved_at, now) if resolved_at else ""
-            recent.append({
-                "series": r.get("series_title", ""),
-                "episode": f"S{r.get('season_number', 0) or 0:02d}E{r.get('episode_number', 0) or 0:02d}",
-                "result": r.get("result", ""),
-                "when": when_str,
-            })
-
+        data = await _build_activity_data(sonarr, db)
+        counts = data["counts"]
         return JSONResponse({
-            "queue": queue,
-            "recent": recent,
+            "queue": data["queue"],
+            "recent": data["recent"],
             "stats": {
                 "downloading": counts["downloading"],
                 "completed": counts["completed"],
                 "warning": counts["warning"],
-                "pending_total": upgrade_stats.get("pending", 0),
+                "pending_total": data["upgrade_stats"].get("pending", 0),
             },
         })
     except Exception as e:
@@ -882,98 +921,30 @@ async def get_activity(request: Request):
 @router.get("/api/activity/html")
 async def get_activity_html(request: Request):
     """Return activity feed as an HTML partial for HTMX."""
-    from datetime import datetime, timezone
-
     cfg = await get_effective_settings()
+    if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
+        return HTMLResponse('<div class="empty-activity">Sonarr is not configured.</div>')
     sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
     settings = get_settings()
     db = await get_db(settings.DB_PATH)
 
     try:
-        queue_items = await sonarr.get_queue()
-        pending_ids = await models.get_pending_episode_ids(db)
-        upgrade_stats = await models.get_upgrade_stats(db)
-
-        queue = []
-        counts = {"downloading": 0, "completed": 0, "warning": 0}
-        for item in queue_items:
-            ep_id = item.get("episodeId")
-            if ep_id not in pending_ids:
-                continue
-
-            size_total = item.get("size", 0) or 0
-            size_left = item.get("sizeleft", 0) or 0
-            progress = int((1 - size_left / size_total) * 100) if size_total > 0 else 0
-
-            state = (item.get("trackedDownloadState") or "").lower()
-            status_val = (item.get("trackedDownloadStatus") or "").lower()
-            status_msgs = item.get("statusMessages") or []
-
-            if status_val in ("warning", "error"):
-                cat = "warning"
-            elif state == "importpending" or progress >= 100:
-                cat = "completed"
-            else:
-                cat = "downloading"
-
-            counts[cat] += 1
-
-            size_str = _fmt_bytes(size_total)
-            downloaded_str = _fmt_bytes(size_total - size_left)
-
-            warning_msg = ""
-            if status_msgs:
-                msgs = []
-                for sm in status_msgs:
-                    for m in sm.get("messages", []):
-                        msgs.append(m)
-                warning_msg = " | ".join(msgs)
-
-            # Try to get series poster from DB
-            series_id = item.get("seriesId")
-            poster_url = None
-            if series_id:
-                series_row = await models.get_series(db, series_id)
-                if series_row:
-                    poster_url = series_row.get("poster_url")
-
-            queue.append({
-                "title": item.get("title", ""),
-                "series": (item.get("series", {}) or {}).get("title", ""),
-                "episode": _fmt_episode(item),
-                "status": cat,
-                "progress": min(progress, 100),
-                "size": size_str,
-                "downloaded": downloaded_str,
-                "eta": item.get("timeleft") or "",
-                "message": warning_msg,
-                "poster_url": poster_url,
-            })
-
-        order = {"downloading": 0, "completed": 1, "warning": 2}
-        queue.sort(key=lambda x: (order.get(x["status"], 9), -x["progress"]))
-
-        recent_rows = await models.get_recent_resolved_upgrades(db, limit=20)
-        now = datetime.now(timezone.utc)
-        recent = []
-        for r in recent_rows:
-            resolved_at = r.get("resolved_at", "")
-            when_str = _time_ago(resolved_at, now) if resolved_at else ""
-            recent.append({
-                "series": r.get("series_title", ""),
-                "episode": f"S{r.get('season_number', 0) or 0:02d}E{r.get('episode_number', 0) or 0:02d}",
-                "result": r.get("result", ""),
-                "when": when_str,
-            })
-
-        # Build HTML
-        html = _render_activity_html(queue, recent, counts, upgrade_stats)
-        return HTMLResponse(html)
-
+        data = await _build_activity_data(sonarr, db)
+        pending = data["upgrade_stats"].get("pending", 0)
+        return _templates(request).TemplateResponse(
+            request,
+            "partials/activity_feed.html",
+            {
+                "queue": data["queue"],
+                "recent": data["recent"],
+                "counts": data["counts"],
+                "pending": pending,
+            },
+        )
     except Exception as e:
         logger.exception("Activity HTML feed error")
         return HTMLResponse(
-            f'<div class="flash flash-error">Error loading activity: {e}</div>'
+            f'<div class="flash flash-error">Error loading activity: {esc(e)}</div>'
         )
     finally:
         await sonarr.close()
@@ -1024,117 +995,6 @@ def _time_ago(ts_str: str, now=None) -> str:
         return f"{d}d ago"
     except (ValueError, TypeError):
         return ""
-
-
-def _render_activity_html(
-    queue: list[dict],
-    recent: list[dict],
-    counts: dict,
-    upgrade_stats: dict,
-) -> str:
-    """Render the full activity feed HTML partial."""
-    total_queue = counts["downloading"] + counts["completed"] + counts["warning"]
-    pending = upgrade_stats.get("pending", 0)
-
-    # Stats bar
-    html = '<div class="activity-stats">'
-    html += f'<div class="stat-pill stat-blue"><span class="stat-num">{counts["downloading"]}</span> Downloading</div>'
-    html += f'<div class="stat-pill stat-green"><span class="stat-num">{counts["completed"]}</span> Completed</div>'
-    html += f'<div class="stat-pill stat-yellow"><span class="stat-num">{counts["warning"]}</span> Warning</div>'
-    html += f'<div class="stat-pill stat-gray"><span class="stat-num">{pending}</span> Pending Total</div>'
-    html += '</div>'
-
-    # Active downloads section
-    html += '<div class="activity-section">'
-    html += '<h3 class="section-heading">Active Downloads</h3>'
-
-    if not queue:
-        html += '<div class="empty-activity">No Babel-tracked items in the Sonarr queue right now.</div>'
-    else:
-        html += '<div class="download-grid">'
-        for item in queue:
-            status = item["status"]
-            badge_class = {"downloading": "badge-blue", "completed": "badge-green", "warning": "badge-yellow"}.get(status, "badge-gray")
-            badge_label = status.upper()
-
-            progress = item["progress"]
-            bar_color = {"downloading": "var(--blue)", "completed": "var(--green)", "warning": "var(--yellow)"}.get(status, "var(--gray)")
-
-            # Poster
-            poster_html = ""
-            if item.get("poster_url"):
-                poster_html = f'<img src="{item["poster_url"]}" alt="" class="dl-poster" loading="lazy"/>'
-            else:
-                poster_html = '<div class="dl-poster dl-poster-placeholder"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="2"/><path d="M21 15l-5-5L5 21"/></svg></div>'
-
-            # ETA
-            eta_html = ""
-            if item.get("eta") and status == "downloading":
-                eta_html = f'<span class="dl-eta">{item["eta"]}</span>'
-
-            # Warning message
-            warn_html = ""
-            if item.get("message") and status == "warning":
-                msg = item["message"]
-                warn_html = f'<div class="dl-warning" style="word-break:break-word;">{msg}</div>'
-
-            # Animated bar class
-            bar_anim = ' bar-animated' if status == "downloading" else ''
-
-            html += f'''<div class="dl-card">
-                <div class="dl-card-inner">
-                    {poster_html}
-                    <div class="dl-info">
-                        <div class="dl-header">
-                            <span class="dl-series">{item["series"]}</span>
-                            <span class="badge {badge_class}" style="font-size:0.65rem;padding:0.15rem 0.5rem;">{badge_label}</span>
-                        </div>
-                        <div class="dl-episode">{item["episode"]} &mdash; {item["title"][:60]}</div>
-                        <div class="dl-progress-wrap">
-                            <div class="dl-progress-bar{bar_anim}">
-                                <div class="dl-progress-fill" style="width:{progress}%;background:{bar_color};"></div>
-                            </div>
-                            <span class="dl-pct">{progress}%</span>
-                        </div>
-                        <div class="dl-meta">
-                            <span>{item["downloaded"]} / {item["size"]}</span>
-                            {eta_html}
-                        </div>
-                        {warn_html}
-                    </div>
-                </div>
-            </div>'''
-        html += '</div>'  # download-grid
-
-    html += '</div>'  # activity-section
-
-    # Recently resolved section
-    html += '<div class="activity-section">'
-    html += '<h3 class="section-heading">Recently Resolved</h3>'
-
-    if not recent:
-        html += '<div class="empty-activity">No resolved upgrades yet.</div>'
-    else:
-        html += '<div class="recent-list">'
-        for r in recent:
-            if r["result"] == "success":
-                icon = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--green)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>'
-                result_class = "recent-success"
-            else:
-                icon = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--red)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
-                result_class = "recent-failed"
-
-            html += f'''<div class="recent-item {result_class}">
-                <span class="recent-icon">{icon}</span>
-                <span class="recent-series">{r["series"]}</span>
-                <span class="recent-ep">{r["episode"]}</span>
-                <span class="recent-when">{r["when"]}</span>
-            </div>'''
-        html += '</div>'
-
-    html += '</div>'  # activity-section
-
-    return html
 
 
 @router.get("/dubs")
@@ -1193,17 +1053,15 @@ async def lookup_dubs(request: Request):
 @router.post("/api/webhook/sonarr")
 async def sonarr_webhook(request: Request):
     """Handle Sonarr webhook events for instant upgrade detection."""
-    # Check webhook secret if configured
-    settings = get_settings()
-    db = await get_db(settings.DB_PATH)
-    try:
-        webhook_key = await models.get_setting(db, "WEBHOOK_SECRET")
-    finally:
-        await db.close()
+    import hmac
+
+    # Check webhook secret if configured (env var or DB-configured override)
+    cfg = await get_effective_settings()
+    webhook_key = cfg.get("WEBHOOK_SECRET", "")
 
     if webhook_key:
         provided = request.query_params.get("apikey", "") or request.headers.get("x-api-key", "")
-        if provided != webhook_key:
+        if not hmac.compare_digest(provided, webhook_key):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
@@ -1231,9 +1089,11 @@ async def sonarr_webhook(request: Request):
             return JSONResponse({"status": "no series id"})
 
         # Re-check audio for the affected episodes
-        cfg = await get_effective_settings()
         settings = get_settings()
         db = await get_db(settings.DB_PATH)
+        target_lang = cfg.get("TARGET_LANGUAGE", "eng")
+        from src.scanner import ffprobe
+
         try:
             # Check if this series is in our DB
             series = await models.get_series(db, series_id)
@@ -1247,8 +1107,9 @@ async def sonarr_webhook(request: Request):
                 if not ep_id:
                     continue
 
-                # Get the file path from the episode file
-                file_path = episode_file.get("relativePath") or episode_file.get("path", "")
+                # Prefer the absolute path Sonarr reports; relativePath alone
+                # would corrupt file-change detection and defeat path-based lookups.
+                file_path = episode_file.get("path") or episode_file.get("relativePath", "")
                 file_size = episode_file.get("size", 0)
 
                 # Update the episode in DB
@@ -1258,22 +1119,15 @@ async def sonarr_webhook(request: Request):
                     ep.get("title"), file_path, file_size,
                 )
 
-                # Check audio via Plex if available
-                plex = None
-                if cfg.get("PLEX_URL") and cfg.get("PLEX_TOKEN"):
-                    plex = PlexClient(cfg["PLEX_URL"], cfg["PLEX_TOKEN"])
-
-                target_lang = cfg.get("TARGET_LANGUAGE", "eng")
-                from src.config import normalize_language
-
+                # Check audio via ffprobe directly — a single-file probe is fast
+                # and avoids triggering a full Plex library index rebuild per episode.
                 tracks = None
-                if plex and file_path:
-                    # Try to get audio from Plex (may not be indexed yet)
-                    tracks = await plex.get_audio_tracks(file_path)
+                if file_path:
+                    local_path = translate_path(file_path, "local", cfg)
+                    tracks = await ffprobe.get_audio_tracks(local_path)
                     if tracks is not None:
                         for t in tracks:
-                            t["language"] = normalize_language(t["language"])
-                            t["source"] = "plex"
+                            t["source"] = "ffprobe"
 
                 if tracks and len(tracks) > 0:
                     await models.replace_audio_tracks(db, ep_id, tracks)
@@ -1293,9 +1147,6 @@ async def sonarr_webhook(request: Request):
 
             # Update series counts
             await models.update_series_counts(db, series_id)
-
-            if plex:
-                await plex.close()
         finally:
             await db.close()
 
@@ -1320,9 +1171,11 @@ async def health_check():
     finally:
         await db.close()
 
+    from src import __version__
+
     return JSONResponse({
         "status": "ok",
-        "version": "1.1.0",
+        "version": __version__,
         "scanning": is_scan_running(),
         "lastScan": stats.get("last_scan_time"),
         "nextScan": get_next_run_time(),
@@ -1369,7 +1222,7 @@ async def get_logs(request: Request, lines: int = 200, level: str = ""):
             color = "var(--yellow)"
         elif "INFO" in line:
             color = "var(--text-primary)"
-        html += f'<div style="color:{color};border-bottom:1px solid rgba(255,255,255,0.03);padding:1px 0;">{line}</div>'
+        html += f'<div style="color:{color};border-bottom:1px solid rgba(255,255,255,0.03);padding:1px 0;">{esc(line)}</div>'
     html += '</div>'
     return HTMLResponse(html)
 

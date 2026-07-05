@@ -1,0 +1,75 @@
+<div class="activity-stats">
+    <div class="stat-pill stat-blue"><span class="stat-num">{{ counts.downloading }}</span> Downloading</div>
+    <div class="stat-pill stat-green"><span class="stat-num">{{ counts.completed }}</span> Completed</div>
+    <div class="stat-pill stat-yellow"><span class="stat-num">{{ counts.warning }}</span> Warning</div>
+    <div class="stat-pill stat-gray"><span class="stat-num">{{ pending }}</span> Pending Total</div>
+</div>
+
+<div class="activity-section">
+    <h3 class="section-heading">Active Downloads</h3>
+    {% if not queue %}
+    <div class="empty-activity">No Babel-tracked items in the Sonarr queue right now.</div>
+    {% else %}
+    <div class="download-grid">
+        {% for item in queue %}
+        {% set badge_class = {"downloading": "badge-blue", "completed": "badge-green", "warning": "badge-yellow"}.get(item.status, "badge-gray") %}
+        {% set bar_color = {"downloading": "var(--blue)", "completed": "var(--green)", "warning": "var(--yellow)"}.get(item.status, "var(--gray)") %}
+        <div class="dl-card">
+            <div class="dl-card-inner">
+                {% if item.poster_url %}
+                <img src="{{ item.poster_url }}" alt="" class="dl-poster" loading="lazy"/>
+                {% else %}
+                <div class="dl-poster dl-poster-placeholder"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="2"/><path d="M21 15l-5-5L5 21"/></svg></div>
+                {% endif %}
+                <div class="dl-info">
+                    <div class="dl-header">
+                        <span class="dl-series">{{ item.series }}</span>
+                        <span class="badge {{ badge_class }}" style="font-size:0.65rem;padding:0.15rem 0.5rem;">{{ item.status.upper() }}</span>
+                    </div>
+                    <div class="dl-episode">{{ item.episode }} &mdash; {{ item.title[:60] }}</div>
+                    <div class="dl-progress-wrap">
+                        <div class="dl-progress-bar{{ ' bar-animated' if item.status == 'downloading' else '' }}">
+                            <div class="dl-progress-fill" style="width:{{ item.progress }}%;background:{{ bar_color }};"></div>
+                        </div>
+                        <span class="dl-pct">{{ item.progress }}%</span>
+                    </div>
+                    <div class="dl-meta">
+                        <span>{{ item.downloaded }} / {{ item.size }}</span>
+                        {% if item.eta and item.status == 'downloading' %}
+                        <span class="dl-eta">{{ item.eta }}</span>
+                        {% endif %}
+                    </div>
+                    {% if item.message and item.status == 'warning' %}
+                    <div class="dl-warning" style="word-break:break-word;">{{ item.message }}</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<div class="activity-section">
+    <h3 class="section-heading">Recently Resolved</h3>
+    {% if not recent %}
+    <div class="empty-activity">No resolved upgrades yet.</div>
+    {% else %}
+    <div class="recent-list">
+        {% for r in recent %}
+        <div class="recent-item {{ 'recent-success' if r.result == 'success' else 'recent-failed' }}">
+            <span class="recent-icon">
+                {% if r.result == 'success' %}
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--green)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                {% else %}
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--red)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                {% endif %}
+            </span>
+            <span class="recent-series">{{ r.series }}</span>
+            <span class="recent-ep">{{ r.episode }}</span>
+            <span class="recent-when">{{ r.when }}</span>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>

@@ -11,10 +11,14 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from src import __version__
 from src.config import get_settings
 from src.db.database import init_db
 from src.scheduler import start_scheduler, stop_scheduler
+from src.web.auth import BasicAuthMiddleware
 from src.web.routes import router
+
+_LOG_FILE_HANDLER_NAME = "babel_rotating_file_handler"
 
 
 @asynccontextmanager
@@ -24,14 +28,19 @@ async def lifespan(app: FastAPI):
         level=settings.LOG_LEVEL,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
-    # Add rotating file handler
-    log_file = Path(__file__).parent.parent / "data" / "babel.log"
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.handlers.RotatingFileHandler(
-        str(log_file), maxBytes=5*1024*1024, backupCount=3
-    )
-    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
-    logging.getLogger().addHandler(file_handler)
+    # Add rotating file handler — guarded so repeated lifespan runs (e.g.
+    # `--reload`, or multiple app instances in a test session) don't stack
+    # duplicate handlers and duplicate every log line.
+    root_logger = logging.getLogger()
+    if not any(getattr(h, "name", None) == _LOG_FILE_HANDLER_NAME for h in root_logger.handlers):
+        log_file = Path(__file__).parent.parent / "data" / "babel.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            str(log_file), maxBytes=5*1024*1024, backupCount=3
+        )
+        file_handler.name = _LOG_FILE_HANDLER_NAME
+        file_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
+        root_logger.addHandler(file_handler)
 
     # Suppress noisy loggers but allow scanner debug
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -45,11 +54,12 @@ async def lifespan(app: FastAPI):
 
     # Set up templates
     templates_dir = Path(__file__).parent / "web" / "templates"
-    app.state.templates = Jinja2Templates(directory=str(templates_dir))
+    templates = Jinja2Templates(directory=str(templates_dir))
+    templates.env.globals["babel_version"] = __version__
+    app.state.templates = templates
 
     # Start scheduler
-    start_scheduler()
-    logger.info("Scheduler started (interval: %dh)", settings.SCAN_INTERVAL_HOURS)
+    await start_scheduler()
 
     yield
 
@@ -59,6 +69,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Babel", lifespan=lifespan)
+app.add_middleware(BasicAuthMiddleware)
 app.include_router(router)
 
 # Mount static files if directory exists

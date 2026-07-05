@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from src.config import get_settings, get_effective_settings, normalize_language
+from src.config import get_settings, get_effective_settings, normalize_language, translate_path, cfg_bool
 from src.scanner.sonarr import SonarrClient
 from src.scanner.plex import PlexClient
 from src.scanner import ffprobe
@@ -12,6 +13,12 @@ from src.db import models
 
 logger = logging.getLogger(__name__)
 
+# Scan state (lock/cancel flag/progress dict/Plex client ref) is process-global,
+# not per-request or DB-backed. This is correct for Babel's single-worker
+# deployment model (see Dockerfile CMD — one uvicorn process, no --workers)
+# but would need to move into the DB or a shared store before running with
+# multiple worker processes, since each worker would get its own copy and
+# `is_scan_running()`/progress polling would only see its own worker's state.
 _scan_lock = asyncio.Lock()
 _scan_cancel = asyncio.Event()
 _plex_client_ref = None
@@ -46,17 +53,6 @@ def is_scan_running() -> bool:
     return _scan_lock.locked()
 
 
-def _translate_path(sonarr_path: str, target: str, cfg: dict) -> str:
-    prefix = cfg.get("SONARR_PATH_PREFIX", "")
-    if not prefix or not sonarr_path.startswith(prefix):
-        return sonarr_path
-    if target == "plex":
-        replacement = cfg.get("PLEX_PATH_PREFIX", "") or cfg.get("LOCAL_PATH_PREFIX", "/media")
-    else:
-        replacement = cfg.get("LOCAL_PATH_PREFIX", "/media")
-    return sonarr_path.replace(prefix, replacement, 1)
-
-
 class RateLimiter:
     def __init__(self, max_per_minute: int):
         self.interval = 60.0 / max_per_minute if max_per_minute > 0 else 0
@@ -68,6 +64,30 @@ class RateLimiter:
         if elapsed < self.interval:
             await asyncio.sleep(self.interval - elapsed)
         self._last_call = time.monotonic()
+
+
+@dataclass
+class ScanStats:
+    """Mutable running totals for one scan pass.
+
+    Replaces the previous pattern of threading ~9 int counters through
+    function parameters — since ints are immutable in Python those
+    parameters were always reset to 0 on every call and never actually
+    accumulated across the call boundary.
+    """
+
+    episodes_checked: int = 0
+    searches_triggered: int = 0
+    errors: int = 0
+    dubbed_found: int = 0
+    sub_only_found: int = 0
+    missing_found: int = 0
+    skipped_unchanged: int = 0
+    plex_cache_hits: int = 0
+    plex_fresh_lookups: int = 0
+    upgrades_succeeded: int = 0
+    upgrades_failed: int = 0
+    successful_upgrades: list = field(default_factory=list)
 
 
 async def check_download_status() -> dict:
@@ -189,12 +209,19 @@ async def resolve_stuck_imports() -> dict:
     - First attempts re-scan, then blocklist+re-search as last resort
     """
     cfg = await get_effective_settings()
-    if cfg.get("AUTO_RESOLVE_IMPORTS", "true") == "false":
+    if not cfg_bool(cfg.get("AUTO_RESOLVE_IMPORTS")):
         return {"checked": 0, "resolved": 0, "skipped": 0}
+
+    # Simulates the categorization and logs what would happen, without
+    # calling any Sonarr mutating endpoint — useful for verifying the
+    # message-pattern heuristics against a real queue before trusting them
+    # to remove/blocklist things automatically.
+    dry_run = cfg_bool(cfg.get("STUCK_IMPORT_DRY_RUN"), default=False)
+    dry_prefix = "[DRY RUN] " if dry_run else ""
 
     db_path = cfg.get("DB_PATH", get_settings().DB_PATH)
     db = await get_db(db_path)
-    summary = {"checked": 0, "resolved": 0, "retried": 0, "skipped": 0}
+    summary = {"checked": 0, "resolved": 0, "retried": 0, "skipped": 0, "unmatched": 0}
 
     try:
         if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
@@ -234,31 +261,38 @@ async def resolve_stuck_imports() -> dict:
 
                 if qid and (is_already_imported or is_no_files):
                     # Safe to just remove — already have it or nothing to import
-                    await sonarr.remove_from_queue(qid, blocklist=False)
+                    if not dry_run:
+                        await sonarr.remove_from_queue(qid, blocklist=False)
                     summary["resolved"] += 1
-                    logger.info("Removed (already imported/empty): %s", item["title"][:80])
+                    logger.info("%sRemoved (already imported/empty): %s", dry_prefix, item["title"][:80])
                     continue
 
                 if qid and is_not_upgrade:
                     # Sonarr grabbed something worse than what we have — remove, don't blocklist
                     # (the release itself isn't bad, just not better than current)
-                    await sonarr.remove_from_queue(qid, blocklist=False)
+                    if not dry_run:
+                        await sonarr.remove_from_queue(qid, blocklist=False)
                     summary["resolved"] += 1
-                    logger.info("Removed (not an upgrade): %s", item["title"][:80])
+                    logger.info("%sRemoved (not an upgrade): %s", dry_prefix, item["title"][:80])
                     continue
 
                 if qid and (is_sample or is_executable):
                     # Bad release — blocklist and re-search
-                    await sonarr.remove_from_queue(qid, blocklist=True)
-                    if ep_id:
-                        await sonarr.search_episodes([ep_id])
+                    if not dry_run:
+                        await sonarr.remove_from_queue(qid, blocklist=True)
+                        if ep_id:
+                            await sonarr.search_episodes([ep_id])
                     summary["resolved"] += 1
-                    logger.info("Blocklisted (sample/exe) and re-searched: %s", item["title"][:80])
+                    logger.info("%sBlocklisted (sample/exe) and re-searched: %s", dry_prefix, item["title"][:80])
                     continue
 
                 # Category 2: ID mismatch — force manual import
                 is_id_mismatch = "matched to series by id" in all_messages or "grab history" in all_messages
                 if is_id_mismatch and qid and item.get("series_id"):
+                    if dry_run:
+                        summary["resolved"] += 1
+                        logger.info("%sWould force-import (ID mismatch): %s", dry_prefix, item["title"][:80])
+                        continue
                     ep_ids = [ep_id] if ep_id else []
                     success = await sonarr.force_manual_import(
                         qid, item["series_id"], ep_ids
@@ -271,6 +305,10 @@ async def resolve_stuck_imports() -> dict:
                 # Category 3: Episode number mismatch — try manual import
                 is_episode_mismatch = "was unexpected" in all_messages
                 if is_episode_mismatch and qid and item.get("series_id"):
+                    if dry_run:
+                        summary["resolved"] += 1
+                        logger.info("%sWould force-import (episode mismatch): %s", dry_prefix, item["title"][:80])
+                        continue
                     ep_ids = [ep_id] if ep_id else []
                     success = await sonarr.force_manual_import(
                         qid, item["series_id"], ep_ids
@@ -282,11 +320,25 @@ async def resolve_stuck_imports() -> dict:
 
                 # Category 4: Fallback — retry import scan
                 if item.get("output_path"):
+                    if dry_run:
+                        summary["retried"] += 1
+                        logger.info("%sWould retry import: %s", dry_prefix, item["title"][:80])
+                        continue
                     success = await sonarr.retry_import(item["output_path"])
                     if success:
                         summary["retried"] += 1
                         logger.info("Retried import: %s", item["title"][:80])
                         continue
+
+                # None of the known message patterns matched and there was no
+                # output path to retry — log the raw messages so new Sonarr
+                # wording (version/locale changes) can be recognized instead
+                # of silently doing nothing.
+                summary["unmatched"] += 1
+                logger.warning(
+                    "Stuck import not resolved (unrecognized status): %s — %s",
+                    item["title"][:80], all_messages[:300],
+                )
 
         finally:
             await sonarr.close()
@@ -297,8 +349,8 @@ async def resolve_stuck_imports() -> dict:
 
     if summary["checked"] > 0:
         logger.info(
-            "Stuck imports: %d checked, %d retried, %d blocklisted+re-searched, %d skipped (not Babel-tracked)",
-            summary["checked"], summary["retried"], summary["resolved"], summary["skipped"],
+            "Stuck imports: %d checked, %d retried, %d blocklisted+re-searched, %d skipped (not Babel-tracked), %d unmatched",
+            summary["checked"], summary["retried"], summary["resolved"], summary["skipped"], summary["unmatched"],
         )
     return summary
 
@@ -316,22 +368,11 @@ async def _execute_scan() -> dict:
     db_path = cfg.get("DB_PATH", get_settings().DB_PATH)
     db = await get_db(db_path)
     scan_id = await models.start_scan_log(db)
-
-    episodes_checked = 0
-    searches_triggered = 0
-    errors = 0
-    dubbed_found = 0
-    sub_only_found = 0
-    missing_found = 0
-    skipped_unchanged = 0
-    plex_cache_hits = 0
-    plex_fresh_lookups = 0
     target_lang = cfg.get("TARGET_LANGUAGE", "eng")
 
     try:
         # Determine what's available
         sonarr = None
-        sonarr_ok = False
         if cfg.get("SONARR_URL") and cfg.get("SONARR_API_KEY"):
             sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
             sonarr_ok, sonarr_msg = await sonarr.test_connection()
@@ -363,10 +404,7 @@ async def _execute_scan() -> dict:
         try:
             if sonarr:
                 return await _scan_with_sonarr(
-                    db, cfg, sonarr, plex, rate_limiter, cooldown, target_lang,
-                    scan_id, episodes_checked, searches_triggered, errors,
-                    dubbed_found, sub_only_found, missing_found,
-                    skipped_unchanged, plex_cache_hits, plex_fresh_lookups,
+                    db, cfg, sonarr, plex, rate_limiter, cooldown, target_lang, scan_id,
                 )
             else:
                 return await _scan_plex_only(
@@ -381,7 +419,7 @@ async def _execute_scan() -> dict:
     except Exception as e:
         logger.exception("Scan failed: %s", e)
         await models.complete_scan_log(
-            db, scan_id, episodes_checked, searches_triggered, errors, "failed", str(e)
+            db, scan_id, 0, 0, 1, "failed", str(e)
         )
         return {"status": "failed", "error": str(e)}
     finally:
@@ -401,6 +439,27 @@ def _is_ignored(path: str, patterns: list[str]) -> bool:
         return False
     path_lower = path.lower()
     return any(p in path_lower for p in patterns)
+
+
+async def _ensure_plex_index(plex, ignore_patterns: list[str]) -> None:
+    """Build the Plex path index the first time it's actually needed.
+
+    Building it eagerly before every scan meant crawling (and reload()-ing)
+    every episode in the whole Plex library even on cycles where nothing
+    changed and the DB cache satisfied every episode — a common steady
+    state. Deferring to first use means a scan that touches nothing new
+    skips the crawl entirely.
+    """
+    if plex is None or plex.is_indexed():
+        return
+    logger.info("Building Plex audio track index (this may take a minute)...")
+    _scan_progress.update(phase="indexing_plex", last_log="Building Plex audio track index...")
+    plex_count = await plex.build_index(ignored_patterns=ignore_patterns)
+    logger.info("Plex index ready: %d episode files indexed", plex_count)
+    _scan_progress.update(phase="scanning", last_log=f"Plex index ready: {plex_count} files")
+    samples = plex.get_sample_paths(3)
+    if samples:
+        logger.info("Sample Plex paths: %s", samples)
 
 
 async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
@@ -434,16 +493,21 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
     sub_only_found = 0
     errors = 0
     plex_series_ids = set()
+    cancelled = False
 
     for i, series in enumerate(plex_series, 1):
         if _scan_cancel.is_set():
             logger.info("Scan cancelled at series %d/%d", i, total_series)
+            cancelled = True
             break
 
         # Use plex_key as a stable numeric ID (offset to avoid collision with Sonarr IDs)
         series_id = -(abs(series["plex_key"]) + 1000000)
         plex_series_ids.add(series_id)
-        await models.upsert_series(db, series_id, series["title"], series.get("path"), poster_url=series.get("poster_url"))
+        await models.upsert_series(
+            db, series_id, series["title"], series.get("path"),
+            poster_url=series.get("poster_url"), commit=False,
+        )
 
         series_dubbed = 0
         series_sub = 0
@@ -451,22 +515,23 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
         episode_ids = set()
 
         for ep in series["episodes"]:
-            # Generate a stable episode ID using hash to avoid collisions
-            ep_id = -(abs(hash((series["plex_key"], ep["season"], ep["episode"]))) % 2_000_000_000)
+            # Use Plex's own ratingKey as a stable ID (negated to avoid collision with Sonarr IDs)
+            ep_id = -(abs(ep["plex_key"]) + 1000000)
             episode_ids.add(ep_id)
 
             await models.upsert_episode(
                 db, ep_id, series_id,
                 ep["season"], ep["episode"],
                 ep["title"], ep["file_path"], ep["file_size"],
+                commit=False,
             )
 
             # Store audio tracks
             if ep["audio_tracks"]:
-                await models.replace_audio_tracks(db, ep_id, ep["audio_tracks"])
+                await models.replace_audio_tracks(db, ep_id, ep["audio_tracks"], commit=False)
 
             status = ep["dub_status"]
-            await models.update_episode_status(db, ep_id, status)
+            await models.update_episode_status(db, ep_id, status, commit=False)
             episodes_checked += 1
 
             if status == "DUBBED":
@@ -479,8 +544,9 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
                 series_unknown += 1
                 errors += 1
 
-        await models.delete_episodes_not_in(db, series_id, episode_ids)
-        await models.update_series_counts(db, series_id)
+        await models.delete_episodes_not_in(db, series_id, episode_ids, commit=False)
+        await models.update_series_counts(db, series_id, commit=False)
+        await db.commit()
 
         total_eps = len(series["episodes"])
         if total_eps > 0:
@@ -492,13 +558,14 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
                 total_eps, series_dubbed, series_sub, dub_pct,
             )
 
-    await models.delete_series_not_in(db, plex_series_ids)
+    if not cancelled:
+        await models.delete_series_not_in(db, plex_series_ids)
     await models.complete_scan_log(
-        db, scan_id, episodes_checked, 0, errors, "completed"
+        db, scan_id, episodes_checked, 0, errors, "cancelled" if cancelled else "completed"
     )
 
     logger.info("=" * 60)
-    logger.info("SCAN COMPLETE (Plex-only)")
+    logger.info("SCAN %s (Plex-only)", "CANCELLED" if cancelled else "COMPLETE")
     logger.info("  Shows found:      %d", total_series)
     logger.info("  Episodes checked: %d", episodes_checked)
     logger.info("  Dubbed:           %d", dubbed_found)
@@ -507,7 +574,7 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
     logger.info("=" * 60)
 
     # Plex collection management
-    if cfg.get("AUTO_COLLECTIONS_PLEX", "true") != "false":
+    if cfg_bool(cfg.get("AUTO_COLLECTIONS_PLEX")):
         try:
             all_series_data = await models.get_all_series(db)
             coll_result = await plex.sync_collections(all_series_data)
@@ -518,7 +585,7 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
     # Discord notifications
     webhook_url = cfg.get("DISCORD_WEBHOOK_URL", "")
     if webhook_url:
-        from src.notifications import notify_scan_complete, notify_upgrades
+        from src.notifications import notify_scan_complete
         return_stats = {
             "episodes_checked": episodes_checked,
             "dubbed": dubbed_found,
@@ -538,16 +605,234 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
     }
 
 
-async def _scan_with_sonarr(
-    db, cfg, sonarr, plex, rate_limiter, cooldown, target_lang,
-    scan_id, episodes_checked, searches_triggered, errors,
-    dubbed_found, sub_only_found, missing_found,
-    skipped_unchanged, plex_cache_hits, plex_fresh_lookups,
+async def _classify_episode_audio(
+    db, ep, plex, cfg, target_lang, ignore_patterns,
+    file_changed, existing_ep, file_path, file_size, stats: ScanStats,
+) -> str:
+    """Determine DUBBED/SUB_ONLY/UNKNOWN for one episode.
+
+    Checks the DB cache first (unless the file changed, in which case the
+    cache is known-stale), then Plex, then falls back to ffprobe. Updates
+    the audio_tracks table and *stats* as a side effect. Returns the new
+    dub_status string.
+    """
+    tracks = None
+    tracks_from_cache = False
+
+    if file_changed:
+        # File changed — the previous audio_tracks row no longer applies.
+        if plex:
+            await _ensure_plex_index(plex, ignore_patterns)
+            plex_path = translate_path(file_path, "plex", cfg)
+            tracks = await plex.get_audio_tracks(plex_path)
+            if tracks is not None:
+                stats.plex_fresh_lookups += 1
+                for t in tracks:
+                    t["language"] = normalize_language(t["language"])
+                    t["source"] = "plex"
+        if tracks is None:
+            local_path = translate_path(file_path, "local", cfg)
+            tracks = await ffprobe.get_audio_tracks(local_path)
+            if tracks is not None:
+                stats.plex_fresh_lookups += 1
+                for t in tracks:
+                    t["source"] = "ffprobe"
+    else:
+        # Normal flow: check cache first, then Plex, then ffprobe.
+        if (existing_ep
+                and existing_ep["file_size"] == file_size
+                and existing_ep["file_path"] == file_path):
+            cached_tracks = await models.get_audio_tracks(db, ep["id"])
+            if cached_tracks:
+                tracks = cached_tracks
+                tracks_from_cache = True
+                stats.plex_cache_hits += 1
+
+        if tracks is None and plex:
+            await _ensure_plex_index(plex, ignore_patterns)
+            plex_path = translate_path(file_path, "plex", cfg)
+            tracks = await plex.get_audio_tracks(plex_path)
+            if tracks is not None:
+                stats.plex_fresh_lookups += 1
+                for t in tracks:
+                    t["language"] = normalize_language(t["language"])
+                    t["source"] = "plex"
+
+        if tracks is None:
+            local_path = translate_path(file_path, "local", cfg)
+            tracks = await ffprobe.get_audio_tracks(local_path)
+            if tracks is not None:
+                stats.plex_fresh_lookups += 1
+                for t in tracks:
+                    t["source"] = "ffprobe"
+
+    if tracks is not None and len(tracks) > 0:
+        if not tracks_from_cache:
+            await models.replace_audio_tracks(db, ep["id"], tracks, commit=False)
+        languages = {t["language"] for t in tracks}
+        status = "DUBBED" if target_lang in languages else "SUB_ONLY"
+    else:
+        status = "UNKNOWN"
+        stats.errors += 1
+
+    return status
+
+
+async def _process_series_episodes(
+    db, cfg, series, episodes, file_map, plex, cooldown, target_lang,
+    ignore_patterns, series_excluded, stats: ScanStats,
 ) -> dict:
+    """Process every episode of one series. Returns per-series counters."""
+    series_dubbed = 0
+    series_sub = 0
+    series_missing = 0
+    series_unknown = 0
+    series_skipped = 0
+    sonarr_episode_ids = set()
+    sub_only_to_search = []
+    failed_retry_ids = []
+
+    for ep in episodes:
+        sonarr_episode_ids.add(ep["id"])
+        file_info = file_map.get(ep["episodeFileId"]) if ep["hasFile"] else None
+        file_path = file_info["path"] if file_info else None
+        file_size = file_info["size"] if file_info else None
+
+        existing_ep = await models.get_episode(db, ep["id"])
+        await models.upsert_episode(
+            db, ep["id"], series["id"],
+            ep["seasonNumber"], ep["episodeNumber"],
+            ep["title"], file_path, file_size,
+            commit=False,
+        )
+
+        if not file_path:
+            await models.update_episode_status(db, ep["id"], "MISSING", commit=False)
+            series_missing += 1
+            stats.missing_found += 1
+            continue
+
+        # Skip unchanged episodes
+        if (existing_ep
+                and existing_ep["file_size"] == file_size
+                and existing_ep["file_path"] == file_path
+                and existing_ep["dub_status"] not in ("UNKNOWN", "MISSING", None)):
+            status = existing_ep["dub_status"]
+            stats.skipped_unchanged += 1
+            series_skipped += 1
+            if status == "DUBBED":
+                series_dubbed += 1
+                stats.dubbed_found += 1
+            elif status == "SUB_ONLY":
+                series_sub += 1
+                stats.sub_only_found += 1
+                if not series_excluded:
+                    last_search = await models.get_last_search_time(db, ep["id"])
+                    now = datetime.now(timezone.utc)
+                    if last_search is None or (now - last_search) > cooldown:
+                        sub_only_to_search.append(ep["id"])
+            continue
+
+        # Detect if file changed (potential upgrade)
+        file_changed = (
+            existing_ep
+            and existing_ep["file_size"] is not None
+            and existing_ep["file_size"] != file_size
+            and existing_ep["dub_status"] == "SUB_ONLY"
+        )
+
+        stats.episodes_checked += 1
+
+        status = await _classify_episode_audio(
+            db, ep, plex, cfg, target_lang, ignore_patterns,
+            file_changed, existing_ep, file_path, file_size, stats,
+        )
+
+        if status == "DUBBED":
+            series_dubbed += 1
+            stats.dubbed_found += 1
+        elif status == "SUB_ONLY":
+            series_sub += 1
+            stats.sub_only_found += 1
+        else:
+            series_unknown += 1
+
+        await models.update_episode_status(db, ep["id"], status, commit=False)
+
+        # Upgrade tracking: resolve pending upgrades when file changes
+        if file_changed:
+            if status == "DUBBED":
+                await models.resolve_upgrade(db, ep["id"], file_size, status, "success", commit=False)
+                stats.upgrades_succeeded += 1
+                stats.successful_upgrades.append({
+                    "series_title": series["title"],
+                    "season": ep["seasonNumber"] or 0,
+                    "episode": ep["episodeNumber"] or 0,
+                    "poster_url": series.get("poster_url"),
+                })
+                logger.info(
+                    "  ✅ Upgrade SUCCESS: %s S%02dE%02d — now dubbed!",
+                    series["title"], ep["seasonNumber"] or 0, ep["episodeNumber"] or 0,
+                )
+            else:
+                await models.resolve_upgrade(db, ep["id"], file_size, status, "failed", commit=False)
+                stats.upgrades_failed += 1
+                # Failed upgrade — force re-search (bypass cooldown)
+                failed_retry_ids.append(ep["id"])
+                logger.warning(
+                    "  ❌ Upgrade FAILED: %s S%02dE%02d — new file still %s, will retry",
+                    series["title"], ep["seasonNumber"] or 0, ep["episodeNumber"] or 0, status,
+                )
+
+        # Collect sub-only for batch search (normal cooldown)
+        if status == "SUB_ONLY" and ep["id"] not in failed_retry_ids and not series_excluded:
+            last_search = await models.get_last_search_time(db, ep["id"])
+            now = datetime.now(timezone.utc)
+            if last_search is None or (now - last_search) > cooldown:
+                sub_only_to_search.append(ep["id"])
+
+    return {
+        "series_dubbed": series_dubbed,
+        "series_sub": series_sub,
+        "series_missing": series_missing,
+        "series_unknown": series_unknown,
+        "series_skipped": series_skipped,
+        "sonarr_episode_ids": sonarr_episode_ids,
+        "sub_only_to_search": sub_only_to_search,
+        "failed_retry_ids": failed_retry_ids,
+    }
+
+
+async def _filter_max_attempts(db, cfg, sub_only_to_search: list[int]) -> list[int]:
+    """Drop episodes that hit MAX_SEARCH_ATTEMPTS with no results, so we
+    stop re-searching for a dub that plainly isn't showing up."""
+    max_search_attempts = int(cfg.get("MAX_SEARCH_ATTEMPTS", 3))
+    if max_search_attempts <= 0 or not sub_only_to_search:
+        return sub_only_to_search
+
+    filtered = []
+    for eid in sub_only_to_search:
+        search_count = await models.get_search_count(db, eid)
+        if search_count >= max_search_attempts:
+            # Only skip if the latest upgrade record shows no_results
+            cur = await db.execute(
+                "SELECT download_status FROM upgrade_tracking WHERE episode_id = ? ORDER BY triggered_at DESC LIMIT 1",
+                (eid,),
+            )
+            row = await cur.fetchone()
+            if row and row["download_status"] == "no_results":
+                continue
+        filtered.append(eid)
+
+    skipped_max = len(sub_only_to_search) - len(filtered)
+    if skipped_max > 0:
+        logger.info("  Skipping %d episodes (max search attempts reached)", skipped_max)
+    return filtered
+
+
+async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, target_lang, scan_id) -> dict:
     """Full scan using Sonarr as primary data source + Plex/ffprobe for audio."""
-    upgrades_succeeded = 0
-    upgrades_failed = 0
-    successful_upgrades = []
+    stats = ScanStats()
 
     anime_series = await sonarr.get_anime_series(cfg.get("ANIME_FILTER", "type"))
 
@@ -568,16 +853,7 @@ async def _scan_with_sonarr(
                 cfg.get("SEARCH_RATE_LIMIT", 5))
     logger.info("=" * 60)
 
-    if plex:
-        logger.info("Building Plex audio track index (this may take a minute)...")
-        _scan_progress.update(phase="indexing_plex", last_log="Building Plex audio track index...")
-        plex_count = await plex.build_index(ignored_patterns=ignore_patterns)
-        logger.info("Plex index ready: %d episode files indexed", plex_count)
-        _scan_progress["last_log"] = f"Plex index ready: {plex_count} files"
-        samples = plex.get_sample_paths(3)
-        if samples:
-            logger.info("Sample Plex paths: %s", samples)
-    else:
+    if not plex:
         logger.info("Plex not configured — will use ffprobe only")
 
     sonarr_series_ids = set()
@@ -594,7 +870,10 @@ async def _scan_with_sonarr(
             series_index=i,
             series_total=total_series,
         )
-        await models.upsert_series(db, series["id"], series["title"], series["path"], poster_url=series.get("poster_url"))
+        await models.upsert_series(
+            db, series["id"], series["title"], series["path"],
+            poster_url=series.get("poster_url"), title_slug=series.get("titleSlug"), commit=False,
+        )
 
         series_excluded = await models.is_series_excluded(db, series["id"])
 
@@ -604,219 +883,42 @@ async def _scan_with_sonarr(
             # No files at all — mark as empty, skip episode-level processing
             existing_series = await models.get_series(db, series["id"])
             if existing_series and existing_series["dub_status"] == "EMPTY":
-                skipped_unchanged += existing_series.get("total_episodes", 0)
-            await models.update_series_counts(db, series["id"])
+                stats.skipped_unchanged += existing_series.get("total_episodes", 0)
+            await models.update_series_counts(db, series["id"], commit=False)
+            await db.commit()
             continue
 
         episodes = await sonarr.get_episodes(series["id"])
         file_map = {ef["id"]: ef for ef in episode_files}
 
-        series_dubbed = 0
-        series_sub = 0
-        series_missing = 0
-        series_unknown = 0
-        series_searched = 0
-        series_skipped = 0
-        sonarr_episode_ids = set()
-        sub_only_to_search = []
-        failed_retry_ids = []
+        result = await _process_series_episodes(
+            db, cfg, series, episodes, file_map, plex, cooldown, target_lang,
+            ignore_patterns, series_excluded, stats,
+        )
 
-        for ep in episodes:
-            sonarr_episode_ids.add(ep["id"])
-            file_info = file_map.get(ep["episodeFileId"]) if ep["hasFile"] else None
-            file_path = file_info["path"] if file_info else None
-            file_size = file_info["size"] if file_info else None
-
-            existing_ep = await models.get_episode(db, ep["id"])
-            await models.upsert_episode(
-                db, ep["id"], series["id"],
-                ep["seasonNumber"], ep["episodeNumber"],
-                ep["title"], file_path, file_size,
-            )
-
-            if not file_path:
-                await models.update_episode_status(db, ep["id"], "MISSING")
-                series_missing += 1
-                missing_found += 1
-                continue
-
-            # Skip unchanged episodes
-            if (existing_ep
-                    and existing_ep["file_size"] == file_size
-                    and existing_ep["file_path"] == file_path
-                    and existing_ep["dub_status"] not in ("UNKNOWN", "MISSING", None)):
-                status = existing_ep["dub_status"]
-                skipped_unchanged += 1
-                series_skipped += 1
-                if status == "DUBBED":
-                    series_dubbed += 1
-                    dubbed_found += 1
-                elif status == "SUB_ONLY":
-                    series_sub += 1
-                    sub_only_found += 1
-                    if not series_excluded:
-                        last_search = await models.get_last_search_time(db, ep["id"])
-                        now = datetime.now(timezone.utc)
-                        if last_search is None or (now - last_search) > cooldown:
-                            sub_only_to_search.append(ep["id"])
-                continue
-
-            # Detect if file changed (potential upgrade)
-            file_changed = (
-                existing_ep
-                and existing_ep["file_size"] is not None
-                and existing_ep["file_size"] != file_size
-                and existing_ep["dub_status"] == "SUB_ONLY"
-            )
-
-            episodes_checked += 1
-            tracks = None
-
-            # File changed — MUST re-check audio (don't use cache)
-            if file_changed:
-                if plex:
-                    plex_path = _translate_path(file_path, "plex", cfg)
-                    tracks = await plex.get_audio_tracks(plex_path)
-                    if tracks is not None:
-                        plex_fresh_lookups += 1
-                        for t in tracks:
-                            t["language"] = normalize_language(t["language"])
-                            t["source"] = "plex"
-                if tracks is None:
-                    local_path = _translate_path(file_path, "local", cfg)
-                    tracks = await ffprobe.get_audio_tracks(local_path)
-                    if tracks is not None:
-                        plex_fresh_lookups += 1
-                        for t in tracks:
-                            t["source"] = "ffprobe"
-            else:
-                # Normal flow: check cache first, then Plex, then ffprobe
-                tracks_from_cache = False
-                if (existing_ep
-                        and existing_ep["file_size"] == file_size
-                        and existing_ep["file_path"] == file_path):
-                    cached_tracks = await models.get_audio_tracks(db, ep["id"])
-                    if cached_tracks:
-                        tracks = cached_tracks
-                        tracks_from_cache = True
-                        plex_cache_hits += 1
-
-                if tracks is None and plex:
-                    plex_path = _translate_path(file_path, "plex", cfg)
-                    tracks = await plex.get_audio_tracks(plex_path)
-                    if tracks is not None:
-                        plex_fresh_lookups += 1
-                        for t in tracks:
-                            t["language"] = normalize_language(t["language"])
-                            t["source"] = "plex"
-
-                if tracks is None:
-                    local_path = _translate_path(file_path, "local", cfg)
-                    tracks = await ffprobe.get_audio_tracks(local_path)
-                    if tracks is not None:
-                        plex_fresh_lookups += 1
-                        for t in tracks:
-                            t["source"] = "ffprobe"
-
-            # Classify
-            if tracks is not None and len(tracks) > 0:
-                if not (not file_changed and locals().get("tracks_from_cache")):
-                    await models.replace_audio_tracks(db, ep["id"], tracks)
-                languages = {t["language"] for t in tracks}
-                if target_lang in languages:
-                    status = "DUBBED"
-                    series_dubbed += 1
-                    dubbed_found += 1
-                else:
-                    status = "SUB_ONLY"
-                    series_sub += 1
-                    sub_only_found += 1
-            elif tracks is not None:
-                status = "UNKNOWN"
-                series_unknown += 1
-                errors += 1
-            else:
-                status = "UNKNOWN"
-                series_unknown += 1
-                errors += 1
-
-            await models.update_episode_status(db, ep["id"], status)
-
-            # Upgrade tracking: resolve pending upgrades when file changes
-            if file_changed:
-                if status == "DUBBED":
-                    await models.resolve_upgrade(
-                        db, ep["id"], file_size, status, "success"
-                    )
-                    upgrades_succeeded += 1
-                    successful_upgrades.append({
-                        "series_title": series["title"],
-                        "season": ep["seasonNumber"] or 0,
-                        "episode": ep["episodeNumber"] or 0,
-                        "poster_url": series.get("poster_url"),
-                    })
-                    logger.info(
-                        "  ✅ Upgrade SUCCESS: %s S%02dE%02d — now dubbed!",
-                        series["title"], ep["seasonNumber"] or 0, ep["episodeNumber"] or 0,
-                    )
-                else:
-                    await models.resolve_upgrade(
-                        db, ep["id"], file_size, status, "failed"
-                    )
-                    upgrades_failed += 1
-                    # Failed upgrade — force re-search (bypass cooldown)
-                    failed_retry_ids.append(ep["id"])
-                    logger.warning(
-                        "  ❌ Upgrade FAILED: %s S%02dE%02d — new file still %s, will retry",
-                        series["title"], ep["seasonNumber"] or 0, ep["episodeNumber"] or 0, status,
-                    )
-
-            # Collect sub-only for batch search (normal cooldown)
-            if status == "SUB_ONLY" and ep["id"] not in failed_retry_ids and not series_excluded:
-                last_search = await models.get_last_search_time(db, ep["id"])
-                now = datetime.now(timezone.utc)
-                if last_search is None or (now - last_search) > cooldown:
-                    sub_only_to_search.append(ep["id"])
-
-        # Filter out episodes that have exceeded max search attempts
-        max_search_attempts = int(cfg.get("MAX_SEARCH_ATTEMPTS", 3))
-        if max_search_attempts > 0 and sub_only_to_search:
-            filtered = []
-            for eid in sub_only_to_search:
-                search_count = await models.get_search_count(db, eid)
-                if search_count >= max_search_attempts:
-                    # Only skip if the latest upgrade record shows no_results
-                    upgrade_rows = await db.execute(
-                        "SELECT download_status FROM upgrade_tracking WHERE episode_id = ? ORDER BY triggered_at DESC LIMIT 1",
-                        (eid,),
-                    )
-                    row = await upgrade_rows.fetchone()
-                    if row and row["download_status"] == "no_results":
-                        continue
-                filtered.append(eid)
-            skipped_max = len(sub_only_to_search) - len(filtered)
-            if skipped_max > 0:
-                logger.info("  Skipping %d episodes (max search attempts reached)", skipped_max)
-            sub_only_to_search = filtered
+        sub_only_to_search = await _filter_max_attempts(db, cfg, result["sub_only_to_search"])
+        failed_retry_ids = result["failed_retry_ids"]
 
         # Batch Sonarr search — normal cooldown-based
+        series_searched = 0
         all_to_search = sub_only_to_search + failed_retry_ids
         if all_to_search:
             await rate_limiter.wait()
             success = await sonarr.search_episodes(all_to_search)
             if success:
                 for eid in all_to_search:
-                    await models.add_search_record(db, eid)
+                    await models.add_search_record(db, eid, scan_id=scan_id, commit=False)
                     # Create upgrade tracking record
                     ep_data = await models.get_episode(db, eid)
                     if ep_data:
                         await models.create_upgrade_record(
-                            db, eid, series["title"],
+                            db, eid, series["id"], series["title"],
                             ep_data.get("season_number", 0),
                             ep_data.get("episode_number", 0),
                             ep_data.get("file_size", 0),
+                            scan_id=scan_id, commit=False,
                         )
-                searches_triggered += len(all_to_search)
+                stats.searches_triggered += len(all_to_search)
                 series_searched = len(all_to_search)
                 if failed_retry_ids:
                     logger.info(
@@ -829,8 +931,15 @@ async def _scan_with_sonarr(
                         series["title"], len(sub_only_to_search),
                     )
 
-        await models.delete_episodes_not_in(db, series["id"], sonarr_episode_ids)
-        await models.update_series_counts(db, series["id"])
+        await models.delete_episodes_not_in(db, series["id"], result["sonarr_episode_ids"], commit=False)
+        await models.update_series_counts(db, series["id"], commit=False)
+        await db.commit()
+
+        series_dubbed = result["series_dubbed"]
+        series_sub = result["series_sub"]
+        series_missing = result["series_missing"]
+        series_unknown = result["series_unknown"]
+        series_skipped = result["series_skipped"]
 
         total_eps = len(episodes)
         with_files = total_eps - series_missing
@@ -851,10 +960,10 @@ async def _scan_with_sonarr(
             logger.info("[%d/%d] ⚪ %s — no downloaded episodes", i, total_series, series["title"])
 
         _scan_progress.update(
-            episodes_checked=episodes_checked,
-            dubbed_found=dubbed_found,
-            sub_only_found=sub_only_found,
-            searches_triggered=searches_triggered,
+            episodes_checked=stats.episodes_checked,
+            dubbed_found=stats.dubbed_found,
+            sub_only_found=stats.sub_only_found,
+            searches_triggered=stats.searches_triggered,
             last_log=log_line,
         )
 
@@ -864,7 +973,7 @@ async def _scan_with_sonarr(
 
     status_label = "cancelled" if cancelled else "completed"
     await models.complete_scan_log(
-        db, scan_id, episodes_checked, searches_triggered, errors, status_label
+        db, scan_id, stats.episodes_checked, stats.searches_triggered, stats.errors, status_label
     )
 
     _scan_progress.update(phase="idle", current_series="", last_log="")
@@ -872,18 +981,18 @@ async def _scan_with_sonarr(
     logger.info("=" * 60)
     logger.info("SCAN %s", "CANCELLED" if cancelled else "COMPLETE")
     logger.info("  Series processed:   %d", total_series)
-    logger.info("  Episodes checked:   %d", episodes_checked)
-    logger.info("  Skipped (cached):   %d", skipped_unchanged)
-    logger.info("  Dubbed:             %d", dubbed_found)
-    logger.info("  Sub-only:           %d", sub_only_found)
-    logger.info("  Missing files:      %d", missing_found)
-    logger.info("  Searches triggered: %d", searches_triggered)
-    logger.info("  Plex cache hits:    %d", plex_cache_hits)
-    logger.info("  Fresh lookups:      %d", plex_fresh_lookups)
-    if upgrades_succeeded or upgrades_failed:
-        logger.info("  Upgrades succeeded: %d", upgrades_succeeded)
-        logger.info("  Upgrades failed:    %d (re-queued)", upgrades_failed)
-    logger.info("  Errors:             %d", errors)
+    logger.info("  Episodes checked:   %d", stats.episodes_checked)
+    logger.info("  Skipped (cached):   %d", stats.skipped_unchanged)
+    logger.info("  Dubbed:             %d", stats.dubbed_found)
+    logger.info("  Sub-only:           %d", stats.sub_only_found)
+    logger.info("  Missing files:      %d", stats.missing_found)
+    logger.info("  Searches triggered: %d", stats.searches_triggered)
+    logger.info("  Plex cache hits:    %d", stats.plex_cache_hits)
+    logger.info("  Fresh lookups:      %d", stats.plex_fresh_lookups)
+    if stats.upgrades_succeeded or stats.upgrades_failed:
+        logger.info("  Upgrades succeeded: %d", stats.upgrades_succeeded)
+        logger.info("  Upgrades failed:    %d (re-queued)", stats.upgrades_failed)
+    logger.info("  Errors:             %d", stats.errors)
     logger.info("=" * 60)
 
     # Auto-check download status for pending upgrades
@@ -906,7 +1015,7 @@ async def _scan_with_sonarr(
         logger.warning("Stuck import resolution failed", exc_info=True)
 
     # Auto-tag series in Sonarr
-    if cfg.get("AUTO_TAG_SONARR", "true") != "false":
+    if cfg_bool(cfg.get("AUTO_TAG_SONARR")):
         try:
             statuses = []
             for sid in sonarr_series_ids:
@@ -920,7 +1029,7 @@ async def _scan_with_sonarr(
             logger.warning("Sonarr tag sync failed", exc_info=True)
 
     # Plex collection management
-    if plex and cfg.get("AUTO_COLLECTIONS_PLEX", "true") != "false":
+    if plex and cfg_bool(cfg.get("AUTO_COLLECTIONS_PLEX")):
         try:
             all_series_data = await models.get_all_series(db)
             coll_result = await plex.sync_collections(all_series_data)
@@ -942,24 +1051,24 @@ async def _scan_with_sonarr(
     if webhook_url:
         from src.notifications import notify_scan_complete, notify_upgrades
         return_stats = {
-            "episodes_checked": episodes_checked,
-            "dubbed": dubbed_found,
-            "sub_only": sub_only_found,
-            "searches_triggered": searches_triggered,
-            "upgrades_succeeded": upgrades_succeeded,
-            "upgrades_failed": upgrades_failed,
+            "episodes_checked": stats.episodes_checked,
+            "dubbed": stats.dubbed_found,
+            "sub_only": stats.sub_only_found,
+            "searches_triggered": stats.searches_triggered,
+            "upgrades_succeeded": stats.upgrades_succeeded,
+            "upgrades_failed": stats.upgrades_failed,
         }
         await notify_scan_complete(webhook_url, return_stats)
-        await notify_upgrades(webhook_url, successful_upgrades)
+        await notify_upgrades(webhook_url, stats.successful_upgrades)
 
     return {
         "status": "completed",
-        "episodes_checked": episodes_checked,
-        "skipped_unchanged": skipped_unchanged,
-        "searches_triggered": searches_triggered,
-        "dubbed": dubbed_found,
-        "sub_only": sub_only_found,
-        "upgrades_succeeded": upgrades_succeeded,
-        "upgrades_failed": upgrades_failed,
-        "errors": errors,
+        "episodes_checked": stats.episodes_checked,
+        "skipped_unchanged": stats.skipped_unchanged,
+        "searches_triggered": stats.searches_triggered,
+        "dubbed": stats.dubbed_found,
+        "sub_only": stats.sub_only_found,
+        "upgrades_succeeded": stats.upgrades_succeeded,
+        "upgrades_failed": stats.upgrades_failed,
+        "errors": stats.errors,
     }

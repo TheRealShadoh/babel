@@ -1,3 +1,4 @@
+import time
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings
@@ -6,7 +7,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     model_config = {"env_prefix": ""}
 
-    SONARR_URL: str
+    SONARR_URL: str = ""
     SONARR_API_KEY: str = ""
     PLEX_URL: str = ""
     PLEX_TOKEN: str = ""
@@ -21,6 +22,16 @@ class Settings(BaseSettings):
     WEB_PORT: int = 8686
     LOG_LEVEL: str = "INFO"
     DB_PATH: str = "/app/data/babel.db"
+    WEBHOOK_SECRET: str = ""
+    AUTH_USERNAME: str = ""
+    AUTH_PASSWORD: str = ""
+    SHOW_THUMBNAILS: str = "true"
+    MAX_SEARCH_ATTEMPTS: int = 3
+    AUTO_TAG_SONARR: str = "true"
+    DISCORD_WEBHOOK_URL: str = ""
+    AUTO_COLLECTIONS_PLEX: str = "true"
+    AUTO_RESOLVE_IMPORTS: str = "true"
+    STUCK_IMPORT_DRY_RUN: str = "false"
 
 
 ISO_639_MAP: dict[str, str] = {
@@ -39,17 +50,36 @@ ISO_639_MAP: dict[str, str] = {
 }
 
 
-def translate_path(sonarr_path: str, target: str = "local") -> str:
-    settings = get_settings()
-    if not settings.SONARR_PATH_PREFIX:
-        return sonarr_path
-    if not sonarr_path.startswith(settings.SONARR_PATH_PREFIX):
+def translate_path(sonarr_path: str, target: str, cfg: dict) -> str:
+    """Rewrite a Sonarr-reported path to the equivalent local or Plex path.
+
+    *cfg* is an effective-settings dict (see get_effective_settings) so that
+    DB-configured path prefixes take effect without a restart.
+    """
+    prefix = cfg.get("SONARR_PATH_PREFIX", "")
+    if not prefix or not sonarr_path.startswith(prefix):
         return sonarr_path
     if target == "plex":
-        replacement = settings.PLEX_PATH_PREFIX or settings.LOCAL_PATH_PREFIX
+        replacement = cfg.get("PLEX_PATH_PREFIX", "") or cfg.get("LOCAL_PATH_PREFIX", "/media")
     else:
-        replacement = settings.LOCAL_PATH_PREFIX
-    return sonarr_path.replace(settings.SONARR_PATH_PREFIX, replacement, 1)
+        replacement = cfg.get("LOCAL_PATH_PREFIX", "/media")
+    return sonarr_path.replace(prefix, replacement, 1)
+
+
+def cfg_bool(value, default: bool = True) -> bool:
+    """Interpret a settings value as a bool.
+
+    Settings booleans are stored as the strings "true"/"false" (env vars and
+    the settings DB table are both plain text), so every call site used to
+    repeat its own `cfg.get("X", "true") != "false"` string comparison.
+    Centralizing it here means a missing/None value falls back to *default*
+    consistently instead of each site re-deriving that behavior.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() != "false"
 
 
 def normalize_language(code: str) -> str:
@@ -64,14 +94,43 @@ def get_settings() -> Settings:
     return Settings()
 
 
+_effective_settings_cache: dict | None = None
+_effective_settings_cache_at: float = 0.0
+_EFFECTIVE_SETTINGS_TTL = 5.0  # seconds
+
+
+def invalidate_effective_settings_cache() -> None:
+    """Force the next get_effective_settings() call to re-read the DB.
+
+    Called after Settings are saved so changes apply immediately instead of
+    waiting out the TTL.
+    """
+    global _effective_settings_cache
+    _effective_settings_cache = None
+
+
 async def get_effective_settings() -> dict:
-    """Return settings dict with DB overrides applied on top of env defaults."""
+    """Return settings dict with DB overrides applied on top of env defaults.
+
+    Result is cached for a few seconds — this is called on every request
+    (including frequent activity/scan-progress polling), and re-opening a
+    SQLite connection just to read the settings table each time is wasteful.
+    """
+    global _effective_settings_cache, _effective_settings_cache_at
+
+    now = time.monotonic()
+    if (
+        _effective_settings_cache is not None
+        and (now - _effective_settings_cache_at) < _EFFECTIVE_SETTINGS_TTL
+    ):
+        return _effective_settings_cache
+
     from src.db.database import get_db
     from src.db.models import get_all_settings
 
     settings = get_settings()
     result = {}
-    for field in settings.model_fields:
+    for field in type(settings).model_fields:
         result[field] = getattr(settings, field)
 
     db = await get_db(settings.DB_PATH)
@@ -91,4 +150,6 @@ async def get_effective_settings() -> dict:
     finally:
         await db.close()
 
+    _effective_settings_cache = result
+    _effective_settings_cache_at = now
     return result

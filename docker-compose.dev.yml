@@ -9,9 +9,11 @@ services:
       # Mount media for ffprobe fallback
       # - /mnt/user/media:/media:ro
     environment:
-      - SONARR_URL=http://localhost:8989
+      # Point these at your Sonarr/Plex host, not localhost — "localhost" inside
+      # the container refers to the container itself, not your host machine.
+      - SONARR_URL=http://your-server:8989
       - SONARR_API_KEY=
-      - PLEX_URL=http://localhost:32400
+      - PLEX_URL=http://your-server:32400
       - PLEX_TOKEN=
       - SCAN_INTERVAL_HOURS=6
       - TARGET_LANGUAGE=eng

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS series (
     sonarr_path TEXT,
     plex_rating_key TEXT,
     poster_url TEXT,
+    title_slug TEXT,
     total_episodes INTEGER DEFAULT 0,
     dubbed_count INTEGER DEFAULT 0,
     sub_only_count INTEGER DEFAULT 0,
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS audio_tracks (
 CREATE TABLE IF NOT EXISTS search_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    scan_id INTEGER REFERENCES scan_log(id) ON DELETE SET NULL,
     triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     trigger_source TEXT DEFAULT 'auto'
 );
@@ -100,6 +102,8 @@ CREATE TABLE IF NOT EXISTS ignored_paths (
 CREATE TABLE IF NOT EXISTS upgrade_tracking (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    scan_id INTEGER REFERENCES scan_log(id) ON DELETE SET NULL,
+    series_id INTEGER,
     series_title TEXT,
     season_number INTEGER,
     episode_number INTEGER,
@@ -119,6 +123,17 @@ CREATE INDEX IF NOT EXISTS idx_upgrade_episode ON upgrade_tracking(episode_id, r
 CREATE INDEX IF NOT EXISTS idx_episodes_status ON episodes(series_id, dub_status);
 
 CREATE INDEX IF NOT EXISTS idx_upgrade_result ON upgrade_tracking(result);
+"""
+
+# Indexes on columns that are added via migration (see database.py) rather
+# than existing in the original CREATE TABLE. These can't live in SCHEMA_SQL
+# above: for an existing installation, executescript() runs before the
+# ALTER TABLE migrations that add the column, so "CREATE INDEX ... ON
+# table(new_column)" would fail with "no such column" on upgrade.
+POST_MIGRATION_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_upgrade_series ON upgrade_tracking(series_id, result);
+CREATE INDEX IF NOT EXISTS idx_upgrade_scan ON upgrade_tracking(scan_id);
+CREATE INDEX IF NOT EXISTS idx_search_history_scan ON search_history(scan_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -178,16 +193,20 @@ async def upsert_series(
     title: str,
     sonarr_path: str | None = None,
     poster_url: str | None = None,
+    title_slug: str | None = None,
+    commit: bool = True,
 ) -> None:
     await db.execute(
-        """INSERT INTO series (id, title, sonarr_path, poster_url)
-           VALUES (?, ?, ?, ?)
+        """INSERT INTO series (id, title, sonarr_path, poster_url, title_slug)
+           VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET title = excluded.title,
                                          sonarr_path = excluded.sonarr_path,
-                                         poster_url = excluded.poster_url""",
-        (id, title, sonarr_path, poster_url),
+                                         poster_url = excluded.poster_url,
+                                         title_slug = excluded.title_slug""",
+        (id, title, sonarr_path, poster_url, title_slug),
     )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def get_all_series(db: aiosqlite.Connection) -> list[dict]:
@@ -253,7 +272,20 @@ async def get_series(db: aiosqlite.Connection, series_id: int) -> dict | None:
         return _row_to_dict(await cur.fetchone())
 
 
-async def update_series_counts(db: aiosqlite.Connection, series_id: int) -> None:
+async def get_poster_urls_for_series(db: aiosqlite.Connection, series_ids: set[int]) -> dict[int, str | None]:
+    """Batch-fetch poster_url for a set of series IDs in one query."""
+    if not series_ids:
+        return {}
+    placeholders = ",".join("?" for _ in series_ids)
+    async with db.execute(
+        f"SELECT id, poster_url FROM series WHERE id IN ({placeholders})",
+        tuple(series_ids),
+    ) as cur:
+        rows = await cur.fetchall()
+    return {r["id"]: r["poster_url"] for r in rows}
+
+
+async def update_series_counts(db: aiosqlite.Connection, series_id: int, commit: bool = True) -> None:
     """Recalculate dubbed/sub_only/unknown counts and dub_status from episodes."""
     async with db.execute(
         """SELECT
@@ -310,7 +342,8 @@ async def update_series_counts(db: aiosqlite.Connection, series_id: int) -> None
             "UPDATE series SET dub_available = ? WHERE id = ?",
             (dub_available_override, series_id),
         )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def delete_series_not_in(db: aiosqlite.Connection, sonarr_ids: set[int]) -> None:
@@ -340,6 +373,7 @@ async def upsert_episode(
     title: str | None,
     file_path: str | None,
     file_size: int | None,
+    commit: bool = True,
 ) -> None:
     await db.execute(
         """INSERT INTO episodes (id, series_id, season_number, episode_number,
@@ -353,11 +387,12 @@ async def upsert_episode(
                                          file_size = excluded.file_size""",
         (id, series_id, season, episode, title, file_path, file_size),
     )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def update_episode_status(
-    db: aiosqlite.Connection, episode_id: int, dub_status: str
+    db: aiosqlite.Connection, episode_id: int, dub_status: str, commit: bool = True
 ) -> None:
     await db.execute(
         """UPDATE episodes
@@ -365,7 +400,8 @@ async def update_episode_status(
            WHERE id = ?""",
         (dub_status, episode_id),
     )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def get_episode(db: aiosqlite.Connection, episode_id: int) -> dict | None:
@@ -389,7 +425,7 @@ async def get_episodes_for_series(
 
 
 async def delete_episodes_not_in(
-    db: aiosqlite.Connection, series_id: int, sonarr_episode_ids: set[int]
+    db: aiosqlite.Connection, series_id: int, sonarr_episode_ids: set[int], commit: bool = True
 ) -> None:
     """Delete episodes for a series whose IDs are not in the given set."""
     if not sonarr_episode_ids:
@@ -400,7 +436,8 @@ async def delete_episodes_not_in(
             f"DELETE FROM episodes WHERE series_id = ? AND id NOT IN ({placeholders})",
             (series_id, *sonarr_episode_ids),
         )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +446,7 @@ async def delete_episodes_not_in(
 
 
 async def replace_audio_tracks(
-    db: aiosqlite.Connection, episode_id: int, tracks: list[dict]
+    db: aiosqlite.Connection, episode_id: int, tracks: list[dict], commit: bool = True
 ) -> None:
     """Delete existing tracks for the episode and insert new ones.
 
@@ -422,7 +459,8 @@ async def replace_audio_tracks(
                VALUES (?, ?, ?, ?)""",
             (episode_id, t["language"], t.get("codec"), t["source"]),
         )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def get_audio_tracks(
@@ -457,14 +495,16 @@ async def get_audio_tracks_for_series(db: aiosqlite.Connection, series_id: int) 
 
 
 async def add_search_record(
-    db: aiosqlite.Connection, episode_id: int, trigger_source: str = "auto"
+    db: aiosqlite.Connection, episode_id: int, trigger_source: str = "auto",
+    scan_id: int | None = None, commit: bool = True,
 ) -> None:
     await db.execute(
-        """INSERT INTO search_history (episode_id, trigger_source)
-           VALUES (?, ?)""",
-        (episode_id, trigger_source),
+        """INSERT INTO search_history (episode_id, trigger_source, scan_id)
+           VALUES (?, ?, ?)""",
+        (episode_id, trigger_source, scan_id),
     )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def get_last_search_time(
@@ -594,39 +634,34 @@ async def get_scan_detail(db: aiosqlite.Connection, scan_id: int) -> dict | None
         return None
     scan = dict(scan_row)
 
-    # 2. Find searches triggered during this scan window
-    started = scan["started_at"]
-    completed = scan["completed_at"] or "9999-12-31"
-
+    # 2. Find searches recorded against this scan_id directly. (Rows written
+    # before the scan_id column existed have NULL here and won't show up —
+    # they previously matched via a timestamp-window heuristic that could
+    # mis-attribute overlapping manual searches to the wrong scan.)
     async with db.execute(
         """SELECT sh.id AS search_id, sh.episode_id, sh.triggered_at, sh.trigger_source,
                   e.season_number, e.episode_number, e.title AS episode_title,
                   e.dub_status AS current_dub_status,
                   s.id AS series_id, s.title AS series_title,
-                  s.dubbed_count, s.sub_only_count
+                  s.dubbed_count, s.sub_only_count,
+                  (SELECT ut.result FROM upgrade_tracking ut
+                   WHERE ut.episode_id = sh.episode_id AND ut.scan_id = sh.scan_id
+                   ORDER BY ut.triggered_at DESC LIMIT 1) AS upgrade_result
            FROM search_history sh
            JOIN episodes e ON e.id = sh.episode_id
            JOIN series s ON s.id = e.series_id
-           WHERE sh.triggered_at >= ? AND sh.triggered_at <= ?
+           WHERE sh.scan_id = ?
            ORDER BY s.title, e.season_number, e.episode_number""",
-        (started, completed),
+        (scan_id,),
     ) as cur:
         search_rows = _rows_to_dicts(await cur.fetchall())
 
-    # 3. For each search, look up upgrade_tracking result
+    # 3. Build search result list from the pre-joined upgrade result
     searches = []
     for sr in search_rows:
-        async with db.execute(
-            """SELECT result FROM upgrade_tracking
-               WHERE episode_id = ? AND triggered_at >= ? AND triggered_at <= ?
-               ORDER BY triggered_at DESC LIMIT 1""",
-            (sr["episode_id"], started, completed),
-        ) as cur:
-            upgrade_row = await cur.fetchone()
-
         status = "NOT_FOUND"
-        if upgrade_row:
-            status = (upgrade_row["result"] or "pending").upper()
+        if sr["upgrade_result"] is not None:
+            status = (sr["upgrade_result"] or "pending").upper()
         searches.append({
             "series_title": sr["series_title"],
             "season_number": sr["season_number"],
@@ -755,21 +790,25 @@ async def is_path_ignored(db: aiosqlite.Connection, path: str) -> bool:
 async def create_upgrade_record(
     db: aiosqlite.Connection,
     episode_id: int,
+    series_id: int,
     series_title: str,
     season: int,
     episode: int,
     old_file_size: int,
+    scan_id: int | None = None,
+    commit: bool = True,
 ) -> int:
     """Create a pending upgrade record when a search is triggered. Returns ID."""
     async with db.execute(
         """INSERT INTO upgrade_tracking
-           (episode_id, series_title, season_number, episode_number,
+           (episode_id, scan_id, series_id, series_title, season_number, episode_number,
             old_file_size, triggered_at, result, old_status)
-           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'pending', 'SUB_ONLY')""",
-        (episode_id, series_title, season, episode, old_file_size),
+           VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'pending', 'SUB_ONLY')""",
+        (episode_id, scan_id, series_id, series_title, season, episode, old_file_size),
     ) as cur:
         rec_id = cur.lastrowid
-    await db.commit()
+    if commit:
+        await db.commit()
     return rec_id
 
 
@@ -787,6 +826,7 @@ async def resolve_upgrade(
     new_file_size: int,
     new_status: str,
     result: str,
+    commit: bool = True,
 ) -> None:
     """Resolve a pending upgrade: 'success' if dubbed, 'failed' if still sub-only."""
     await db.execute(
@@ -798,7 +838,8 @@ async def resolve_upgrade(
            WHERE episode_id = ? AND result = 'pending'""",
         (new_file_size, new_status, result, episode_id),
     )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def increment_upgrade_attempts(db: aiosqlite.Connection, episode_id: int) -> None:
@@ -965,7 +1006,7 @@ async def get_recently_dubbed_series(db: aiosqlite.Connection, days: int = 30) -
                   COUNT(ut.id) AS upgraded_count,
                   MAX(ut.resolved_at) AS last_upgrade_at
            FROM series s
-           JOIN upgrade_tracking ut ON ut.series_title = s.title
+           JOIN upgrade_tracking ut ON ut.series_id = s.id
            WHERE ut.result = 'success'
              AND ut.resolved_at >= datetime('now', ?)
            GROUP BY s.id

@@ -139,6 +139,10 @@ class PlexClient:
             logger.warning("Skipped %d episodes during indexing (reload failed)", skipped)
         return count
 
+    def is_indexed(self) -> bool:
+        """True once build_index() has run (even if it found nothing)."""
+        return self._path_index is not None
+
     async def get_audio_tracks(self, file_path: str) -> list[dict] | None:
         """Look up audio tracks from pre-built indexes."""
         if self._path_index is None:
@@ -226,6 +230,7 @@ class PlexClient:
                                     dub_status = "UNKNOWN"
 
                                 series_data["episodes"].append({
+                                    "plex_key": episode.ratingKey,
                                     "season": episode.parentIndex or 0,
                                     "episode": episode.index or 0,
                                     "title": episode.title,
