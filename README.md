@@ -104,6 +104,39 @@ All settings can be configured via environment variables or the web UI Settings 
 | `WEBHOOK_SECRET` | | If set, the Sonarr webhook requires `?apikey=` (or `X-Api-Key` header) to match |
 | `AUTH_USERNAME` / `AUTH_PASSWORD` | | If both are set, the whole dashboard requires HTTP Basic Auth |
 | `PUID` / `PGID` | `1000` / `1000` | UID/GID the container runs as — match your host's media/data ownership |
+| `FFPROBE_TIMEOUT` | `30` | Seconds a single ffprobe may run before it is killed |
+| `FFPROBE_MAX_CONCURRENT` | `4` | Max simultaneous ffprobe children — caps what a hung mount can strand |
+| `FFPROBE_SLOT_TIMEOUT` | `15` | Seconds to wait for a free probe slot before skipping the file |
+| `WATCHDOG_UNHEALTHY_LAG` | `15` | Event-loop lag (s) above which `/api/health` returns 503 |
+| `WATCHDOG_ABORT_LAG` | `300` | Event-loop lag (s) after which Babel exits so Docker restarts it; `0` disables |
+
+### Unresponsive media mounts
+
+Babel reads audio tracks with `ffprobe`, so it is exposed to whatever storage
+holds your media. If that storage stops responding — a suspended ZFS pool, a
+dead NFS/SMB share — reads block indefinitely, and an unbounded probe can take
+the whole app with it.
+
+Babel is built so that a hung mount degrades instead of wedging:
+
+- No filesystem call runs on the event loop. Only the `ffprobe` child touches
+  the media path, and it can be killed. A blocked event loop would stop
+  serving HTTP *and*, under uvloop, stop reaping exited children — which is how
+  a storage blip turns into thousands of zombie processes.
+- Every probe is bounded by `FFPROBE_TIMEOUT`, and no more than
+  `FFPROBE_MAX_CONCURRENT` may be in flight, so a dead mount strands a handful
+  of processes rather than one per episode.
+- Killed children are always reaped, including when a scan is cancelled or the
+  app shuts down mid-probe.
+- Affected episodes are recorded as `UNKNOWN` and retried on the next scan;
+  the dashboard stays responsive throughout.
+- If the loop does stall anyway, the watchdog logs it, `/api/health` starts
+  returning 503, and past `WATCHDOG_ABORT_LAG` the process exits so
+  `restart: unless-stopped` can recover it. Docker never restarts a container
+  for being *unhealthy* — only for exiting — so this is what closes that gap.
+
+`scripts/repro_hung_mount.py` exercises all of the above against a fake mount
+that never responds; run it with `--legacy` to see the pre-1.1.1 behaviour.
 
 ### Security
 

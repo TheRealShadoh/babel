@@ -33,6 +33,22 @@ class Settings(BaseSettings):
     AUTO_RESOLVE_IMPORTS: str = "true"
     STUCK_IMPORT_DRY_RUN: str = "false"
 
+    # --- ffprobe / hung-mount hardening -------------------------------------
+    # Media paths may live on a network share or ZFS pool that can stall
+    # indefinitely. Every one of these bounds an unbounded wait.
+    FFPROBE_TIMEOUT: float = 30.0          # per-probe wall clock
+    FFPROBE_KILL_GRACE: float = 5.0        # wait after SIGTERM/SIGKILL before escalating
+    FFPROBE_MAX_CONCURRENT: int = 4        # caps processes stuck on a hung mount
+    FFPROBE_SLOT_TIMEOUT: float = 15.0     # give up rather than queue behind a hung mount
+
+    # --- event-loop watchdog -------------------------------------------------
+    # A blocked event loop stops serving HTTP *and*, under uvloop, stops reaping
+    # child processes. Docker reports the container unhealthy but will not
+    # restart it, so the process has to notice and exit on its own.
+    WATCHDOG_INTERVAL: float = 1.0
+    WATCHDOG_UNHEALTHY_LAG: float = 15.0   # /api/health starts returning 503
+    WATCHDOG_ABORT_LAG: float = 300.0      # hard-exit so the restart policy kicks in; 0 disables
+
 
 ISO_639_MAP: dict[str, str] = {
     "en": "eng",

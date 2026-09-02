@@ -216,3 +216,83 @@ the case.
 - [x] **README/API drift check.** Documented `WEBHOOK_SECRET`, the `?apikey=` query
   param, `AUTH_USERNAME`/`AUTH_PASSWORD`, `PUID`/`PGID`, and added the previously
   undocumented `/api/scan/stop` and `/api/setup-sonarr-dub` endpoints to the API table.
+
+---
+
+## Follow-up — uvicorn zombie processes under I/O stall (2026-09-02)
+
+Production incident: 2,040 zombie processes accumulated over ~2.5 days, all with
+`PPID` = the uvicorn process, while a ZFS pool under part of the media tree was
+suspended. Docker reported the container `unhealthy` for the whole window and
+nothing acted on it. Every zombie was reaped the instant I/O was unblocked.
+
+### Verified in code
+
+- **Only one subprocess spawn site exists** — `src/scanner/ffprobe.py`, reached
+  from the scan engine (`_classify_episode_audio`) and the Sonarr webhook route.
+  There was **no unconditional fire-and-forget spawn**: the normal and timeout
+  paths both waited on the child.
+- **`Path(file_path).exists()` ran inline on the event loop**, against the media
+  path — the one blocking filesystem call in the probe path, and the only one
+  anywhere in the app that touches a mounted path. `plex.py` already routed its
+  blocking work through `asyncio.to_thread`.
+- **`await proc.wait()` after `kill()` was unbounded.** Measured: with a 1s probe
+  timeout, the call returned after **59.0s**, because `Process.wait()` resolves
+  only once the process has exited *and* every pipe has closed.
+- **`except asyncio.TimeoutError` did not catch `CancelledError`**, so a scan
+  cancelled mid-probe (scheduler shutdown, client disconnect) propagated out
+  leaving the child running with nobody to collect it — a fire-and-forget spawn
+  on the cancellation path only.
+- **uvicorn was PID 1** (`entrypoint.sh` ends in `exec gosu babel "$@"`).
+
+### Verified experimentally
+
+- Under **uvloop** (which `uvicorn[standard]` selects by default), a blocked
+  event-loop thread stops child reaping entirely: 20 of 20 exited children stayed
+  zombies for the whole stall and were reaped the moment the loop resumed. Under
+  stdlib asyncio's `ThreadedChildWatcher` the same test leaks nothing. This
+  reproduces the incident's signature, including the batch reap on recovery.
+- A uvloop process that is PID 1 (or a child-subreaper) **never** reaps orphans
+  reparented to it, even with the loop running normally.
+
+### Corrections to the original hypothesis
+
+- The blocked-loop theory is **confirmed**, with the added condition that it
+  depends on uvloop; the same code on stdlib asyncio would not have leaked.
+- **An init shim would not have prevented this leak.** The zombies' parent
+  (uvicorn) never died, so they were never reparented to PID 1 and `tini` would
+  never have seen them. `tini` is added for signal forwarding and genuine
+  orphans, but it is not a backstop for this failure.
+- The healthcheck was **not** broken: a stalled loop cannot answer HTTP, so
+  `unhealthy` was correct. The gap was that nothing acts on `unhealthy` —
+  `restart: unless-stopped` only reacts to the container exiting.
+
+### Changes
+
+- [x] `src/scanner/ffprobe.py` rewritten: no filesystem syscall on the loop, a
+  bounded slot acquire, a bounded probe timeout, SIGTERM→SIGKILL escalation, a
+  detached reaper that waits on `returncode` (not `wait()`, which is pinned by
+  pipe holders), and reaping on the cancellation path.
+- [x] `src/watchdog.py`: a loop-lag heartbeat plus a daemon thread that logs a
+  stall, drives `/api/health` to 503, and hard-exits past `WATCHDOG_ABORT_LAG`.
+- [x] `src/web/routes.py`: `/api/health` reports `loopLagSeconds` and returns 503
+  when degraded; its `os.path.getsize`/`exists` and the log-tail `open()` moved
+  to `asyncio.to_thread`.
+- [x] `Dockerfile`: `tini` as PID 1; healthcheck gains `--max-time` and
+  `--start-period`.
+- [x] `docker-compose*.yml`: `init: true`, plus the new knobs documented.
+- [x] `tests/test_ffprobe_hardening.py`, `tests/test_watchdog.py` — 10 tests.
+  Four of the ffprobe tests fail against the pre-fix implementation.
+- [x] `scripts/repro_hung_mount.py` — end-to-end repro against a fake mount that
+  never responds. Passes on the fix; phases A and A2 fail with `--legacy`.
+
+### Known limits
+
+- The repro's "hung mount" is a set of FIFOs plus an injected blocking `stat()`.
+  That reproduces indefinite blocking but not uninterruptible (D-state) sleep,
+  which needs a real broken mount and privileges. The design covers D-state by
+  bounding concurrency and detaching the reaper rather than waiting on it.
+- The incident report noted `ffprobe` processes among the blocked set but did not
+  confirm they belonged to Babel rather than Plex. Nothing here depends on that:
+  the zombies' `PPID` was uvicorn's, which is sufficient on its own.
+

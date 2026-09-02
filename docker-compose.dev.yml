@@ -17,7 +17,14 @@ services:
       - PLEX_TOKEN=
       - SCAN_INTERVAL_HOURS=6
       - TARGET_LANGUAGE=eng
+    # Docker never restarts a container merely because it is *unhealthy* —
+    # `restart: unless-stopped` reacts only to the process exiting. Babel's
+    # in-process watchdog covers that gap by hard-exiting when the event loop
+    # stalls past WATCHDOG_ABORT_LAG, which this policy then restarts.
     restart: unless-stopped
+    # Belt and braces: the image already runs tini as PID 1, but this also
+    # applies if the entrypoint is overridden or an older tag is pinned.
+    init: true
 
 volumes:
   babel-data:
