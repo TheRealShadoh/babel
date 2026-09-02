@@ -274,7 +274,7 @@
             <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
         </svg>
         <span>Started:</span>
-        <span class="mono">{{ scan.started_at }}</span>
+        <span class="mono" data-timestamp data-timestamp-absolute>{{ scan.started_at }}</span>
     </div>
     {% if scan.completed_at %}
     <div class="scan-meta-item">
@@ -282,7 +282,7 @@
             <circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/>
         </svg>
         <span>Ended:</span>
-        <span class="mono">{{ scan.completed_at }}</span>
+        <span class="mono" data-timestamp data-timestamp-absolute>{{ scan.completed_at }}</span>
     </div>
     {% endif %}
 </div>

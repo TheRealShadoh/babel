@@ -3,11 +3,18 @@ without a live Sonarr/Plex server."""
 
 
 class FakeSonarr:
-    def __init__(self, series=None, episodes_by_series=None, files_by_series=None, stuck_imports=None):
+    def __init__(self, series=None, episodes_by_series=None, files_by_series=None,
+                 stuck_imports=None, fail_series=False, fail_episodes_for=(),
+                 fail_files_for=()):
         self._series = series or []
         self._episodes = episodes_by_series or {}
         self._files = files_by_series or {}
         self._stuck = stuck_imports or []
+        # None means "the request failed", which is different from an empty
+        # list and must never license a delete.
+        self._fail_series = fail_series
+        self._fail_episodes_for = set(fail_episodes_for)
+        self._fail_files_for = set(fail_files_for)
         self.searched_ids: list[list[int]] = []
         self.sync_dub_tags_calls = []
         self.removed_from_queue: list[tuple[int, bool]] = []
@@ -15,12 +22,18 @@ class FakeSonarr:
         self.retried_imports: list[str] = []
 
     async def get_anime_series(self, filter_mode):
+        if self._fail_series:
+            return None
         return self._series
 
     async def get_episode_files(self, series_id):
+        if series_id in self._fail_files_for:
+            return None
         return self._files.get(series_id, [])
 
     async def get_episodes(self, series_id):
+        if series_id in self._fail_episodes_for:
+            return None
         return self._episodes.get(series_id, [])
 
     async def search_episodes(self, episode_ids):
@@ -90,8 +103,11 @@ class FakePlex:
     def get_sample_paths(self, n):
         return list(self.tracks_by_path.keys())[:n]
 
-    async def sync_collections(self, series_data):
-        return {"collections_updated": 0}
+    async def sync_collections(self, series_data, changed=True):
+        self.sync_collections_calls = getattr(self, "sync_collections_calls", 0) + 1
+        if not changed:
+            return {"collections_updated": 0, "skipped": True}
+        return {"collections_updated": 0, "skipped": False}
 
     async def get_library_data(self, target_lang):
         return self.library_data

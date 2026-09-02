@@ -16,7 +16,7 @@ from src.config import get_settings
 from src.db.database import init_db
 from src.scheduler import start_scheduler, stop_scheduler
 from src.watchdog import start_watchdog, stop_watchdog
-from src.web.auth import BasicAuthMiddleware
+from src.web.auth import BasicAuthMiddleware, SameOriginMiddleware
 from src.web.routes import router
 
 _LOG_FILE_HANDLER_NAME = "babel_rotating_file_handler"
@@ -80,7 +80,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Babel", lifespan=lifespan)
+# Added last, so it runs first: a cross-origin write is rejected before any
+# authentication work happens.
 app.add_middleware(BasicAuthMiddleware)
+app.add_middleware(SameOriginMiddleware)
 app.include_router(router)
 
 # Mount static files if directory exists

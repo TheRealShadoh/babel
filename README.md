@@ -102,7 +102,9 @@ All settings can be configured via environment variables or the web UI Settings 
 | `SEARCH_RATE_LIMIT` | `5` | Max Sonarr searches per minute |
 | `DISCORD_WEBHOOK_URL` | | Discord webhook for notifications |
 | `WEBHOOK_SECRET` | | If set, the Sonarr webhook requires `?apikey=` (or `X-Api-Key` header) to match |
-| `AUTH_USERNAME` / `AUTH_PASSWORD` | | If both are set, the whole dashboard requires HTTP Basic Auth |
+| `AUTH_USERNAME` / `AUTH_PASSWORD` | | If both are set, the whole dashboard requires HTTP Basic Auth. Overrides anything set in Settings → Access |
+| `ALLOW_CROSS_ORIGIN_WRITES` | `false` | Allow state-changing requests from other origins (off by default) |
+| `BABEL_BUILD` | | Stamped into the image at build time; surfaced as `revision` on `/api/health` |
 | `PUID` / `PGID` | `1000` / `1000` | UID/GID the container runs as — match your host's media/data ownership |
 | `FFPROBE_TIMEOUT` | `30` | Seconds a single ffprobe may run before it is killed |
 | `FFPROBE_MAX_CONCURRENT` | `4` | Max simultaneous ffprobe children — caps what a hung mount can strand |
@@ -144,13 +146,24 @@ Babel has no built-in accounts and, by default, no authentication — anyone who
 can reach the port can view and change settings (including your Sonarr API
 key and Plex token). For anything beyond a trusted home LAN, do one of:
 
-- Set `AUTH_USERNAME` + `AUTH_PASSWORD` to put the dashboard behind HTTP Basic Auth, or
+- Set a username and password under **Settings → Access**, or
+- Set `AUTH_USERNAME` + `AUTH_PASSWORD` in the container environment, or
 - Put Babel behind a reverse proxy (Caddy, Traefik, Nginx Proxy Manager, etc.)
   that handles authentication.
+
+A password set in Settings is stored hashed (PBKDF2-SHA256). The environment
+variables always win over the stored values, so you can recover access from
+compose if you ever lock yourself out.
 
 `GET /api/health` and `POST /api/webhook/sonarr` are always reachable without
 Basic Auth credentials (health checks and Sonarr can't complete an interactive
 login) — set `WEBHOOK_SECRET` to authenticate the webhook instead.
+
+Because the dashboard's forms carry no per-request token, Babel also refuses
+state-changing requests that arrive from another origin — otherwise any page
+open in another browser tab could repoint your Sonarr connection. Set
+`ALLOW_CROSS_ORIGIN_WRITES=true` only if you deliberately drive Babel's
+endpoints from a different origin.
 
 ### Sonarr Webhook (Recommended)
 

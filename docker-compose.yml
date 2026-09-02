@@ -6,7 +6,9 @@ services:
       - "8686:8686"
     volumes:
       - babel-data:/app/data
-      # Optional: mount media for ffprobe fallback
+      # Strongly recommended: without this, ffprobe cannot read any file, so
+      # every episode Plex does not already know about is left "unknown" and
+      # webhook-driven updates do nothing. Match LOCAL_PATH_PREFIX below.
       # - /mnt/user/media:/media:ro
     environment:
       # Point these at your Sonarr/Plex host, not localhost — "localhost" inside

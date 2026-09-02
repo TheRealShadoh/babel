@@ -5,6 +5,12 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Listing calls that feed orphan cleanup return None — not [] — when the
+# request fails. The distinction is load-bearing: an empty list means "Sonarr
+# says there is nothing here" and licences a delete, while None means "we do
+# not know" and must never be acted on. Conflating the two is how a single
+# timeout used to wipe the database.
+
 
 class SonarrClient:
     def __init__(self, url: str, api_key: str):
@@ -104,14 +110,15 @@ class SonarrClient:
 
         return counts
 
-    async def get_anime_series(self, filter_mode: str = "type") -> list[dict]:
+    async def get_anime_series(self, filter_mode: str = "type") -> list[dict] | None:
+        """Return the filtered series list, or None if Sonarr could not be read."""
         try:
             resp = await self.client.get("/series")
             resp.raise_for_status()
             all_series = resp.json()
         except httpx.HTTPError as e:
             logger.error("Failed to fetch series: %s", e)
-            return []
+            return None
 
         if filter_mode == "type":
             return [
@@ -125,7 +132,7 @@ class SonarrClient:
             tag_id = await self._resolve_tag(tag_name)
             if tag_id is None:
                 logger.warning("Tag '%s' not found in Sonarr", tag_name)
-                return []
+                return None
             return [
                 self._slim_series(s)
                 for s in all_series
@@ -135,13 +142,14 @@ class SonarrClient:
         logger.warning("Unknown filter_mode '%s', returning all series", filter_mode)
         return [self._slim_series(s) for s in all_series]
 
-    async def get_episodes(self, series_id: int) -> list[dict]:
+    async def get_episodes(self, series_id: int) -> list[dict] | None:
+        """Return the series' episodes, or None if Sonarr could not be read."""
         try:
             resp = await self.client.get("/episode", params={"seriesId": series_id})
             resp.raise_for_status()
         except httpx.HTTPError as e:
             logger.error("Failed to fetch episodes for series %d: %s", series_id, e)
-            return []
+            return None
 
         return [
             {
@@ -155,7 +163,8 @@ class SonarrClient:
             for ep in resp.json()
         ]
 
-    async def get_episode_files(self, series_id: int) -> list[dict]:
+    async def get_episode_files(self, series_id: int) -> list[dict] | None:
+        """Return the series' files, or None if Sonarr could not be read."""
         try:
             resp = await self.client.get(
                 "/episodefile", params={"seriesId": series_id}
@@ -165,7 +174,7 @@ class SonarrClient:
             logger.error(
                 "Failed to fetch episode files for series %d: %s", series_id, e
             )
-            return []
+            return None
 
         return [
             {
@@ -436,12 +445,18 @@ class SonarrClient:
     async def sync_dub_tags(self, series_statuses: list[dict]) -> dict:
         """Sync dub status tags for multiple series.
 
-        series_statuses: [{"sonarr_id": 123, "dub_status": "DUBBED"}, ...]
+        series_statuses: [{"sonarr_id": 123, "dub_status": "DUBBED",
+                           "current_tags": [1, 4]}, ...]
 
         Creates tags: babel:dubbed, babel:partial-dub, babel:sub-only
         For each series, ensures the correct tag is applied and others removed.
 
-        Returns: {"tagged": N, "errors": N}
+        When *current_tags* is supplied the desired set is compared against it
+        first and matching series are skipped entirely. Without that check
+        every series took a GET plus a full-object PUT on every single scan,
+        because the "remove the other two Babel tags" list is never empty.
+
+        Returns: {"tagged": N, "skipped": N, "errors": N}
         """
         # Define tag mapping
         tag_map = {
@@ -459,6 +474,7 @@ class SonarrClient:
 
         all_babel_tag_ids = set(tag_ids.values())
         tagged = 0
+        skipped = 0
         errors = 0
 
         for entry in series_statuses:
@@ -472,6 +488,14 @@ class SonarrClient:
             tags_to_add = [correct_tag_id] if correct_tag_id else []
             tags_to_remove = list(all_babel_tag_ids - set(tags_to_add))
 
+            current = entry.get("current_tags")
+            if current is not None:
+                current_set = set(current)
+                desired = (current_set - set(tags_to_remove)) | set(tags_to_add)
+                if desired == current_set:
+                    skipped += 1
+                    continue
+
             if tags_to_add or tags_to_remove:
                 success = await self.set_series_tags(sid, tags_to_add, tags_to_remove)
                 if success:
@@ -479,7 +503,7 @@ class SonarrClient:
                 else:
                     errors += 1
 
-        return {"tagged": tagged, "errors": errors}
+        return {"tagged": tagged, "skipped": skipped, "errors": errors}
 
     async def close(self):
         await self.client.aclose()

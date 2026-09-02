@@ -9,6 +9,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Stamped into the image so a running container can be matched to the commit
+# it was built from — `latest` is republished on every push and the semantic
+# version rarely moves.
+ARG BABEL_BUILD=source
+ENV BABEL_BUILD=${BABEL_BUILD}
+
 COPY src/ ./src/
 COPY entrypoint.sh /entrypoint.sh
 RUN mkdir -p /app/data && chmod +x /entrypoint.sh && chown -R babel:babel /app

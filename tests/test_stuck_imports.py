@@ -40,7 +40,6 @@ def patch_sonarr(monkeypatch, fake):
 
 @pytest.mark.asyncio
 async def test_untracked_episode_is_skipped(db_and_env, monkeypatch):
-    db = db_and_env
     # No upgrade_tracking row for episode 999 — must be skipped, not acted on.
     fake = FakeSonarr(stuck_imports=[
         stuck_item(1, 999, 1, "Some.Release", ["already imported"]),

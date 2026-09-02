@@ -353,11 +353,13 @@
 
 {% block content %}
 {# ── Helper macro: build URL preserving current params ── #}
+{# Values are URL-encoded: a title containing & or # otherwise truncated
+   every filter, sort and pagination link built from it. #}
 {% macro filter_url(status=None, q=None, pg=None, sort=None) -%}
     /series?
-    {%- if status is not none %}status={{ status }}&{% endif -%}
-    {%- if q is not none and q != '' %}q={{ q }}&{% endif -%}
-    {%- if sort is not none and sort != '' %}sort={{ sort }}&{% endif -%}
+    {%- if status is not none %}status={{ status | urlencode }}&{% endif -%}
+    {%- if q is not none and q != '' %}q={{ q | urlencode }}&{% endif -%}
+    {%- if sort is not none and sort != '' %}sort={{ sort | urlencode }}&{% endif -%}
     {%- if pg is not none and pg > 1 %}page={{ pg }}{% endif -%}
 {%- endmacro %}
 
@@ -408,7 +410,8 @@
 <div class="series-grid">
     {% for s in series %}
     {% set status_class = 'green' if s.dub_status == 'DUBBED' else ('yellow' if s.dub_status == 'PARTIAL' else ('red' if s.dub_status == 'SUB_ONLY' else 'gray')) %}
-    {% set dubbed_pct = (s.dubbed_count / s.total_episodes * 100) if s.total_episodes > 0 else 0 %}
+    {% set downloaded = s.total_episodes - (s.missing_count or 0) %}
+    {% set dubbed_pct = (s.dubbed_count / downloaded * 100) if downloaded > 0 else 0 %}
     <a href="/series/{{ s.id }}" class="series-card series-card--{{ status_class }}{% if not show_thumbnails %} series-card--no-poster{% endif %}" style="text-decoration:none;color:inherit;">
         {% if show_thumbnails %}
         <div class="series-card__poster">
@@ -431,7 +434,11 @@
                 <div class="series-card__progress-fill" style="width: {{ dubbed_pct | round(1) }}%"></div>
             </div>
             <div class="series-card__stats">
-                <span class="series-card__fraction"><strong>{{ s.dubbed_count }}</strong> / {{ s.total_episodes }} dubbed</span>
+                <span class="series-card__fraction"
+                      title="{{ s.dubbed_count }} of {{ downloaded }} downloaded episodes are dubbed{% if s.missing_count %} · {{ s.missing_count }} not downloaded{% endif %}">
+                    <strong>{{ s.dubbed_count }}</strong> / {{ downloaded }} dubbed
+                    {%- if s.missing_count %} <span class="text-muted">({{ s.total_episodes }} total)</span>{% endif -%}
+                </span>
                 {% if s.dub_status == "DUBBED" %}
                     <span class="badge badge-green">Dubbed</span>
                 {% elif s.dub_status == "PARTIAL" %}
@@ -448,6 +455,9 @@
                 <span><span class="count-dot count-dot--green"></span>{{ s.dubbed_count }} dub</span>
                 <span><span class="count-dot count-dot--red"></span>{{ s.sub_only_count }} sub</span>
                 <span><span class="count-dot count-dot--gray"></span>{{ s.unknown_count }} unk</span>
+                {% if s.missing_count %}
+                <span title="Episodes with no file yet"><span class="count-dot count-dot--gray" style="opacity:0.45;"></span>{{ s.missing_count }} missing</span>
+                {% endif %}
                 {% if s.dub_available == 'available' %}
                     <span style="color:var(--green);font-weight:600;margin-left:auto;">Dub Available</span>
                 {% elif s.dub_available == 'likely' %}

@@ -1,11 +1,9 @@
-import os
 from datetime import timedelta
 
 import pytest
 
 from src.db.database import init_db, get_db
 from src.db import models
-from src.scanner import engine
 from src.scanner.engine import RateLimiter, _scan_with_sonarr
 
 from tests.fakes import FakeSonarr, FakePlex, base_cfg, sonarr_episode, sonarr_file

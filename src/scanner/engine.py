@@ -23,6 +23,12 @@ _scan_lock = asyncio.Lock()
 _scan_cancel = asyncio.Event()
 _plex_client_ref = None
 
+# Set synchronously the moment a scan is requested, before the task that will
+# run it has been scheduled. _scan_lock alone is not enough for callers that
+# only create a task: two requests arriving in the same tick both see an
+# unlocked lock and both schedule a scan.
+_scan_requested = False
+
 # Live scan progress — read by the UI for real-time updates
 _scan_progress = {
     "phase": "",          # "indexing_plex", "scanning", "idle"
@@ -50,7 +56,25 @@ def request_scan_cancel():
 
 
 def is_scan_running() -> bool:
-    return _scan_lock.locked()
+    return _scan_lock.locked() or _scan_requested
+
+
+def reserve_scan() -> bool:
+    """Claim the right to start a scan. Returns False if one is already claimed.
+
+    Synchronous on purpose: the caller can rely on the reservation having
+    taken effect before it yields to the event loop.
+    """
+    global _scan_requested
+    if _scan_lock.locked() or _scan_requested:
+        return False
+    _scan_requested = True
+    return True
+
+
+def release_scan_reservation() -> None:
+    global _scan_requested
+    _scan_requested = False
 
 
 class RateLimiter:
@@ -77,8 +101,10 @@ class ScanStats:
     """
 
     episodes_checked: int = 0
+    episodes_seen: int = 0
     searches_triggered: int = 0
     errors: int = 0
+    undetermined: int = 0
     dubbed_found: int = 0
     sub_only_found: int = 0
     missing_found: int = 0
@@ -87,6 +113,7 @@ class ScanStats:
     plex_fresh_lookups: int = 0
     upgrades_succeeded: int = 0
     upgrades_failed: int = 0
+    status_changed: bool = False
     successful_upgrades: list = field(default_factory=list)
 
 
@@ -356,11 +383,21 @@ async def resolve_stuck_imports() -> dict:
 
 
 async def run_scan() -> dict:
+    """Run one scan pass. At most one may be in flight at a time."""
+    global _scan_requested
     if _scan_lock.locked():
+        _scan_requested = False
         return {"status": "skipped", "reason": "scan already in progress"}
-    _scan_cancel.clear()
     async with _scan_lock:
-        return await _execute_scan()
+        # Cleared inside the lock so a stop requested against the running scan
+        # can never be discarded by a second caller that is about to be
+        # rejected anyway.
+        _scan_cancel.clear()
+        _scan_requested = False
+        try:
+            return await _execute_scan()
+        finally:
+            _scan_progress.update(phase="idle", current_series="", last_log="")
 
 
 async def _execute_scan() -> dict:
@@ -475,7 +512,18 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
 
     logger.info("Scanning Plex library for all shows and audio tracks...")
 
+    _scan_progress.update(
+        phase="indexing_plex", series_index=0, series_total=0,
+        last_log="Reading the Plex library...",
+    )
     plex_series = await plex.get_library_data(target_lang)
+    if not plex_series:
+        # Either Plex genuinely has no shows or the read failed; both look the
+        # same from here, and neither justifies deleting the whole library.
+        msg = "Plex returned no shows — aborting scan without touching stored data."
+        logger.error(msg)
+        await models.complete_scan_log(db, scan_id, 0, 0, 1, "failed", msg)
+        return {"status": "failed", "error": msg}
 
     # Filter out ignored paths
     if ignore_patterns:
@@ -491,7 +539,8 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
     episodes_checked = 0
     dubbed_found = 0
     sub_only_found = 0
-    errors = 0
+    undetermined = 0
+    status_changed = False
     plex_series_ids = set()
     cancelled = False
 
@@ -500,6 +549,13 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
             logger.info("Scan cancelled at series %d/%d", i, total_series)
             cancelled = True
             break
+
+        _scan_progress.update(
+            phase="scanning",
+            current_series=series["title"],
+            series_index=i,
+            series_total=total_series,
+        )
 
         # Use plex_key as a stable numeric ID (offset to avoid collision with Sonarr IDs)
         series_id = -(abs(series["plex_key"]) + 1000000)
@@ -542,10 +598,13 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
                 sub_only_found += 1
             else:
                 series_unknown += 1
-                errors += 1
+                undetermined += 1
 
-        await models.delete_episodes_not_in(db, series_id, episode_ids, commit=False)
-        await models.update_series_counts(db, series_id, commit=False)
+        await models.delete_episodes_not_in(
+            db, series_id, episode_ids, commit=False, allow_empty=True
+        )
+        if await models.update_series_counts(db, series_id, commit=False):
+            status_changed = True
         await db.commit()
 
         total_eps = len(series["episodes"])
@@ -557,12 +616,21 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
                 i, total_series, status_icon, series["title"],
                 total_eps, series_dubbed, series_sub, dub_pct,
             )
+            _scan_progress.update(
+                episodes_checked=episodes_checked,
+                dubbed_found=dubbed_found,
+                sub_only_found=sub_only_found,
+                last_log=f"[{i}/{total_series}] {series['title']} — {dub_pct}% dubbed",
+            )
 
     if not cancelled:
         await models.delete_series_not_in(db, plex_series_ids)
     await models.complete_scan_log(
-        db, scan_id, episodes_checked, 0, errors, "cancelled" if cancelled else "completed"
+        db, scan_id, episodes_checked, 0, 0,
+        "cancelled" if cancelled else "completed",
+        episodes_seen=episodes_checked, undetermined=undetermined,
     )
+    _scan_progress.update(phase="idle", current_series="", last_log="")
 
     logger.info("=" * 60)
     logger.info("SCAN %s (Plex-only)", "CANCELLED" if cancelled else "COMPLETE")
@@ -570,6 +638,7 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
     logger.info("  Episodes checked: %d", episodes_checked)
     logger.info("  Dubbed:           %d", dubbed_found)
     logger.info("  Sub-only:         %d", sub_only_found)
+    logger.info("  Undetermined:     %d", undetermined)
     logger.info("  Note: Sonarr searches disabled (Sonarr not connected)")
     logger.info("=" * 60)
 
@@ -577,8 +646,14 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
     if cfg_bool(cfg.get("AUTO_COLLECTIONS_PLEX")):
         try:
             all_series_data = await models.get_all_series(db)
-            coll_result = await plex.sync_collections(all_series_data)
-            logger.info("Plex collections synced: %d shows updated", coll_result["collections_updated"])
+            coll_result = await plex.sync_collections(
+                all_series_data, changed=status_changed
+            )
+            if not coll_result.get("skipped"):
+                logger.info(
+                    "Plex collections synced: %d shows updated",
+                    coll_result["collections_updated"],
+                )
         except Exception:
             logger.warning("Plex collection sync failed", exc_info=True)
 
@@ -601,7 +676,8 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
         "searches_triggered": 0,
         "dubbed": dubbed_found,
         "sub_only": sub_only_found,
-        "errors": errors,
+        "undetermined": undetermined,
+        "errors": 0,
     }
 
 
@@ -672,8 +748,11 @@ async def _classify_episode_audio(
         languages = {t["language"] for t in tracks}
         status = "DUBBED" if target_lang in languages else "SUB_ONLY"
     else:
+        # Audio could not be read — the file is not in Plex and ffprobe could
+        # not reach it. That is a normal outcome for an unmounted library, not
+        # a scan error, and counting it as one made every scan look broken.
         status = "UNKNOWN"
-        stats.errors += 1
+        stats.undetermined += 1
 
     return status
 
@@ -815,11 +894,11 @@ async def _filter_max_attempts(db, cfg, sub_only_to_search: list[int]) -> list[i
         search_count = await models.get_search_count(db, eid)
         if search_count >= max_search_attempts:
             # Only skip if the latest upgrade record shows no_results
-            cur = await db.execute(
+            async with db.execute(
                 "SELECT download_status FROM upgrade_tracking WHERE episode_id = ? ORDER BY triggered_at DESC LIMIT 1",
                 (eid,),
-            )
-            row = await cur.fetchone()
+            ) as cur:
+                row = await cur.fetchone()
             if row and row["download_status"] == "no_results":
                 continue
         filtered.append(eid)
@@ -835,6 +914,17 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
     stats = ScanStats()
 
     anime_series = await sonarr.get_anime_series(cfg.get("ANIME_FILTER", "type"))
+    if anime_series is None:
+        # The listing failed. Reconciling against a list we never received
+        # would delete the entire library, so stop here instead.
+        msg = "Sonarr series listing failed — aborting scan without touching stored data."
+        logger.error(msg)
+        await models.complete_scan_log(db, scan_id, 0, 0, 1, "failed", msg)
+        return {"status": "failed", "error": msg}
+
+    # Orphan cleanup at the end of the scan is only safe if every series was
+    # enumerated successfully. One failed request anywhere below clears this.
+    reconcile_ok = True
 
     # Filter ignored paths
     ignore_patterns = await _load_ignore_patterns(db)
@@ -879,16 +969,46 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
 
         # Quick check: get episode files first — if none, skip the full episode fetch
         episode_files = await sonarr.get_episode_files(series["id"])
-        if not episode_files:
-            # No files at all — mark as empty, skip episode-level processing
-            existing_series = await models.get_series(db, series["id"])
-            if existing_series and existing_series["dub_status"] == "EMPTY":
-                stats.skipped_unchanged += existing_series.get("total_episodes", 0)
-            await models.update_series_counts(db, series["id"], commit=False)
-            await db.commit()
+        if episode_files is None:
+            logger.warning(
+                "Skipping %s — could not read its files from Sonarr", series["title"]
+            )
+            reconcile_ok = False
+            stats.errors += 1
             continue
 
         episodes = await sonarr.get_episodes(series["id"])
+        if episodes is None:
+            logger.warning(
+                "Skipping %s — could not read its episodes from Sonarr", series["title"]
+            )
+            reconcile_ok = False
+            stats.errors += 1
+            continue
+
+        if not episode_files:
+            # Sonarr confirms the series has no files. Drop any episode rows
+            # left over from when it did, so a deleted show stops reporting
+            # the status its old rows still carry.
+            existing_series = await models.get_series(db, series["id"])
+            if existing_series and existing_series["dub_status"] == "EMPTY":
+                stats.skipped_unchanged += existing_series.get("total_episodes", 0)
+            keep_ids = {ep["id"] for ep in episodes}
+            await models.delete_episodes_not_in(
+                db, series["id"], keep_ids, commit=False, allow_empty=True
+            )
+            for ep in episodes:
+                await models.upsert_episode(
+                    db, ep["id"], series["id"], ep["seasonNumber"], ep["episodeNumber"],
+                    ep["title"], None, None, commit=False,
+                )
+                await models.update_episode_status(db, ep["id"], "MISSING", commit=False)
+            if await models.update_series_counts(db, series["id"], commit=False):
+                stats.status_changed = True
+            await db.commit()
+            continue
+
+        stats.episodes_seen += len(episodes)
         file_map = {ef["id"]: ef for ef in episode_files}
 
         result = await _process_series_episodes(
@@ -931,8 +1051,12 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
                         series["title"], len(sub_only_to_search),
                     )
 
-        await models.delete_episodes_not_in(db, series["id"], result["sonarr_episode_ids"], commit=False)
-        await models.update_series_counts(db, series["id"], commit=False)
+        await models.delete_episodes_not_in(
+            db, series["id"], result["sonarr_episode_ids"], commit=False,
+            allow_empty=not episodes,
+        )
+        if await models.update_series_counts(db, series["id"], commit=False):
+            stats.status_changed = True
         await db.commit()
 
         series_dubbed = result["series_dubbed"]
@@ -968,12 +1092,21 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
         )
 
     cancelled = _scan_cancel.is_set()
-    if not cancelled:
+    if cancelled:
+        logger.info("Skipping orphan cleanup — scan was cancelled before it finished")
+    elif not reconcile_ok:
+        logger.warning(
+            "Skipping orphan cleanup — at least one Sonarr request failed, so the "
+            "series list seen this pass is incomplete."
+        )
+    else:
         await models.delete_series_not_in(db, sonarr_series_ids)
 
     status_label = "cancelled" if cancelled else "completed"
     await models.complete_scan_log(
-        db, scan_id, stats.episodes_checked, stats.searches_triggered, stats.errors, status_label
+        db, scan_id, stats.episodes_checked, stats.searches_triggered, stats.errors,
+        status_label, episodes_seen=stats.episodes_seen,
+        undetermined=stats.undetermined,
     )
 
     _scan_progress.update(phase="idle", current_series="", last_log="")
@@ -981,7 +1114,8 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
     logger.info("=" * 60)
     logger.info("SCAN %s", "CANCELLED" if cancelled else "COMPLETE")
     logger.info("  Series processed:   %d", total_series)
-    logger.info("  Episodes checked:   %d", stats.episodes_checked)
+    logger.info("  Episodes seen:      %d", stats.episodes_seen)
+    logger.info("  Episodes probed:    %d", stats.episodes_checked)
     logger.info("  Skipped (cached):   %d", stats.skipped_unchanged)
     logger.info("  Dubbed:             %d", stats.dubbed_found)
     logger.info("  Sub-only:           %d", stats.sub_only_found)
@@ -992,6 +1126,7 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
     if stats.upgrades_succeeded or stats.upgrades_failed:
         logger.info("  Upgrades succeeded: %d", stats.upgrades_succeeded)
         logger.info("  Upgrades failed:    %d (re-queued)", stats.upgrades_failed)
+    logger.info("  Undetermined:       %d", stats.undetermined)
     logger.info("  Errors:             %d", stats.errors)
     logger.info("=" * 60)
 
@@ -1017,14 +1152,30 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
     # Auto-tag series in Sonarr
     if cfg_bool(cfg.get("AUTO_TAG_SONARR")):
         try:
+            # One query instead of one per series, and carry each series'
+            # current Sonarr tags so unchanged shows are skipped rather than
+            # re-fetched and re-PUT on every scan.
+            tags_by_id = {s["id"]: s.get("tags", []) for s in anime_series}
             statuses = []
-            for sid in sonarr_series_ids:
-                s = await models.get_series(db, sid)
-                if s and s["dub_status"] in ("DUBBED", "PARTIAL", "SUB_ONLY"):
-                    statuses.append({"sonarr_id": sid, "dub_status": s["dub_status"]})
+            async with db.execute(
+                "SELECT id, dub_status FROM series "
+                "WHERE dub_status IN ('DUBBED', 'PARTIAL', 'SUB_ONLY')"
+            ) as cur:
+                rows = await cur.fetchall()
+            for row in rows:
+                if row["id"] not in sonarr_series_ids:
+                    continue
+                statuses.append({
+                    "sonarr_id": row["id"],
+                    "dub_status": row["dub_status"],
+                    "current_tags": tags_by_id.get(row["id"]),
+                })
             if statuses:
                 tag_result = await sonarr.sync_dub_tags(statuses)
-                logger.info("Sonarr tags synced: %d tagged, %d errors", tag_result["tagged"], tag_result["errors"])
+                logger.info(
+                    "Sonarr tags synced: %d tagged, %d unchanged, %d errors",
+                    tag_result["tagged"], tag_result.get("skipped", 0), tag_result["errors"],
+                )
         except Exception:
             logger.warning("Sonarr tag sync failed", exc_info=True)
 
@@ -1032,8 +1183,14 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
     if plex and cfg_bool(cfg.get("AUTO_COLLECTIONS_PLEX")):
         try:
             all_series_data = await models.get_all_series(db)
-            coll_result = await plex.sync_collections(all_series_data)
-            logger.info("Plex collections synced: %d shows updated", coll_result["collections_updated"])
+            coll_result = await plex.sync_collections(
+                all_series_data, changed=stats.status_changed
+            )
+            if not coll_result.get("skipped"):
+                logger.info(
+                    "Plex collections synced: %d shows updated",
+                    coll_result["collections_updated"],
+                )
         except Exception:
             logger.warning("Plex collection sync failed", exc_info=True)
 
