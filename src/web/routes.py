@@ -4,6 +4,7 @@ Babel web routes — FastAPI router for dashboard pages and API endpoints.
 
 import asyncio
 import logging
+import os
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -1155,14 +1156,22 @@ async def sonarr_webhook(request: Request):
     return JSONResponse({"status": "ok"})
 
 
+def _db_size(db_path: str) -> int:
+    """stat() the DB file. Called via a thread — never inline on the loop."""
+    try:
+        return os.path.getsize(db_path)
+    except OSError:
+        return 0
+
+
 @router.get("/api/health")
 async def health_check():
-    import os
     from src.scanner.engine import is_scan_running
+    from src.watchdog import loop_lag_seconds
 
     settings = get_settings()
     db_path = settings.DB_PATH
-    db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+    db_size = await asyncio.to_thread(_db_size, db_path)
 
     db = await get_db(settings.DB_PATH)
     try:
@@ -1173,9 +1182,18 @@ async def health_check():
 
     from src import __version__
 
-    return JSONResponse({
-        "status": "ok",
+    # A stalled event loop cannot answer this request at all, so reaching here
+    # already proves the loop is turning. Reporting the lag still matters: it
+    # catches a loop that is degraded rather than fully wedged, and makes the
+    # Docker healthcheck fail *before* the stall grows long enough to start
+    # leaking unreaped children.
+    lag = loop_lag_seconds()
+    healthy = lag <= settings.WATCHDOG_UNHEALTHY_LAG
+
+    return JSONResponse(status_code=200 if healthy else 503, content={
+        "status": "ok" if healthy else "degraded",
         "version": __version__,
+        "loopLagSeconds": round(lag, 3),
         "scanning": is_scan_running(),
         "lastScan": stats.get("last_scan_time"),
         "nextScan": get_next_run_time(),
@@ -1198,11 +1216,19 @@ async def get_logs(request: Request, lines: int = 200, level: str = ""):
     """Return last N lines of the log file."""
     from pathlib import Path
     log_file = Path(__file__).resolve().parent.parent.parent / "data" / "babel.log"
-    if not log_file.exists():
-        return HTMLResponse('<p class="text-muted">No log file found.</p>')
 
-    with open(log_file) as f:
-        all_lines = f.readlines()
+    def _read() -> list[str] | None:
+        try:
+            with open(log_file, errors="replace") as f:
+                return f.readlines()
+        except FileNotFoundError:
+            return None
+
+    # Off the loop: this opens and reads a file, and no filesystem call belongs
+    # on the event loop thread.
+    all_lines = await asyncio.to_thread(_read)
+    if all_lines is None:
+        return HTMLResponse('<p class="text-muted">No log file found.</p>')
 
     # Filter by level if specified
     if level:

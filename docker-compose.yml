@@ -17,6 +17,13 @@ services:
       - PLEX_TOKEN=
       - SCAN_INTERVAL_HOURS=6
       - TARGET_LANGUAGE=eng
+      # Hung-mount hardening. Every probe is bounded, and at most
+      # FFPROBE_MAX_CONCURRENT ffprobe processes can be stuck on a dead mount
+      # at once. Raise the timeouts for very slow storage.
+      # - FFPROBE_TIMEOUT=30
+      # - FFPROBE_MAX_CONCURRENT=4
+      # Hard-exit if the event loop stalls this long (seconds); 0 disables.
+      # - WATCHDOG_ABORT_LAG=300
       # Match the data volume's ownership to your host user (defaults to 1000:1000)
       # - PUID=1000
       # - PGID=1000
@@ -25,7 +32,14 @@ services:
       # - AUTH_PASSWORD=
       # Optional: require ?apikey= on the Sonarr webhook endpoint
       # - WEBHOOK_SECRET=
+    # Docker never restarts a container merely because it is *unhealthy* —
+    # `restart: unless-stopped` reacts only to the process exiting. Babel's
+    # in-process watchdog covers that gap by hard-exiting when the event loop
+    # stalls past WATCHDOG_ABORT_LAG, which this policy then restarts.
     restart: unless-stopped
+    # Belt and braces: the image already runs tini as PID 1, but this also
+    # applies if the entrypoint is overridden or an older tag is pinned.
+    init: true
 
 volumes:
   babel-data:
