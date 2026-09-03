@@ -145,6 +145,9 @@
                     <div class="scan-body">
                         <div class="scan-header">
                             <span class="scan-time" data-timestamp>{{ log.started_at }}</span>
+                            {% if log.kind == "dub_lookup" %}
+                                <span class="badge badge-gray" title="Checked MyAnimeList for dub availability — not a media scan">Dub lookup</span>
+                            {% endif %}
                             {% if log.status == "completed" %}
                                 <span class="badge badge-green">Done</span>
                             {% elif log.status == "cancelled" %}
@@ -172,8 +175,16 @@
                             {% endif %}
                         </div>
                         <div class="scan-stats">
-                            <span class="stat-pill"><strong>{{ log.episodes_checked }}</strong> eps</span>
+                            {% if log.kind == "dub_lookup" %}
+                            <span class="stat-pill" title="Series checked against MyAnimeList"><strong>{{ log.episodes_checked }}</strong> series</span>
+                            {% else %}
+                            <span class="stat-pill" title="Episodes seen this pass"><strong>{{ log.episodes_seen or log.episodes_checked }}</strong> eps</span>
+                            <span class="stat-pill" title="Episodes whose audio was probed — the rest were served from cache"><strong>{{ log.episodes_checked }}</strong> probed</span>
+                            {% endif %}
                             <span class="stat-pill"><strong>{{ log.searches_triggered }}</strong> srch</span>
+                            {% if log.undetermined %}
+                            <span class="stat-pill" title="Audio could not be read — usually the media volume is not mounted"><strong>{{ log.undetermined }}</strong> unread</span>
+                            {% endif %}
                             <span class="stat-pill"><strong>{{ log.errors }}</strong> err</span>
                         </div>
                         {% if log.error_message %}
@@ -210,7 +221,7 @@
                         <span class="search-episode">{{ entry.series_title }}</span><br>
                         <span class="search-code">S{{ "%02d"|format(entry.season_number or 0) }}E{{ "%02d"|format(entry.episode_number or 0) }}</span>
                     </td>
-                    <td><span class="search-timestamp">{{ entry.triggered_at }}</span></td>
+                    <td><span class="search-timestamp" data-timestamp>{{ entry.triggered_at }}</span></td>
                     <td>
                         {% if entry.trigger_source == "auto" %}
                             <span class="badge badge-blue" style="font-size:0.72rem;">Auto</span>
@@ -257,7 +268,7 @@
                             {% else %}
                                 <span class="badge badge-blue" style="font-size:0.72rem;">Pending</span>
                             {% endif %}
-                            <span class="search-timestamp">{{ u.triggered_at[:16] if u.triggered_at else '' }}</span>
+                            <span class="search-timestamp" {% if u.triggered_at %}data-timestamp{% endif %}>{{ u.triggered_at or '' }}</span>
                         </div>
                     </div>
                 </div>

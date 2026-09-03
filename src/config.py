@@ -1,7 +1,10 @@
+import logging
 import time
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -25,6 +28,7 @@ class Settings(BaseSettings):
     WEBHOOK_SECRET: str = ""
     AUTH_USERNAME: str = ""
     AUTH_PASSWORD: str = ""
+    AUTH_PASSWORD_HASH: str = ""
     SHOW_THUMBNAILS: str = "true"
     MAX_SEARCH_ATTEMPTS: int = 3
     AUTO_TAG_SONARR: str = "true"
@@ -154,15 +158,29 @@ async def get_effective_settings() -> dict:
         db_settings = await get_all_settings(db)
         for key, value in db_settings.items():
             upper_key = key.upper()
-            if upper_key in result:
-                # Cast to the same type as the env default
-                original = result[upper_key]
-                if isinstance(original, int):
-                    try:
-                        value = int(value)
-                    except ValueError:
-                        continue
-                result[upper_key] = value
+            if upper_key not in result:
+                continue
+            # Cast to the same type as the env default. Both int and float
+            # matter: the ffprobe and watchdog timeouts are floats, and a
+            # string reaching them fails at the comparison, not at load.
+            original = result[upper_key]
+            caster = None
+            if isinstance(original, bool):
+                caster = None
+            elif isinstance(original, int):
+                caster = int
+            elif isinstance(original, float):
+                caster = float
+            if caster is not None:
+                try:
+                    value = caster(value)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Ignoring unusable value for %s (%r is not a %s); "
+                        "keeping %r", upper_key, value, caster.__name__, original,
+                    )
+                    continue
+            result[upper_key] = value
     finally:
         await db.close()
 

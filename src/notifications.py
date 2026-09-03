@@ -28,9 +28,12 @@ async def send_discord_embed(webhook_url: str, title: str, description: str,
 
 async def notify_scan_complete(webhook_url: str, stats: dict):
     fields = []
-    if stats.get("dubbed"): fields.append({"name": "Dubbed", "value": str(stats["dubbed"]), "inline": True})
-    if stats.get("sub_only"): fields.append({"name": "Sub-Only", "value": str(stats["sub_only"]), "inline": True})
-    if stats.get("searches_triggered"): fields.append({"name": "Searches", "value": str(stats["searches_triggered"]), "inline": True})
+    if stats.get("dubbed"):
+        fields.append({"name": "Dubbed", "value": str(stats["dubbed"]), "inline": True})
+    if stats.get("sub_only"):
+        fields.append({"name": "Sub-Only", "value": str(stats["sub_only"]), "inline": True})
+    if stats.get("searches_triggered"):
+        fields.append({"name": "Searches", "value": str(stats["searches_triggered"]), "inline": True})
     up_ok = stats.get("upgrades_succeeded", 0)
     up_fail = stats.get("upgrades_failed", 0)
     if up_ok or up_fail:
@@ -55,9 +58,11 @@ async def notify_upgrades(webhook_url: str, upgrades: list[dict]):
     thumb = None
     for title, data in by_series.items():
         eps = ", ".join(data["eps"][:10])
-        if len(data["eps"]) > 10: eps += f" (+{len(data['eps'])-10} more)"
+        if len(data["eps"]) > 10:
+            eps += f" (+{len(data['eps'])-10} more)"
         lines.append(f"**{title}** \u2014 {eps}")
-        if not thumb: thumb = data.get("poster")
+        if not thumb:
+            thumb = data.get("poster")
 
     total = sum(len(d["eps"]) for d in by_series.values())
     await send_discord_embed(webhook_url,

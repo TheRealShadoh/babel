@@ -36,6 +36,10 @@ async def init_db(db_path: str) -> None:
         await db.executescript(SCHEMA_SQL)
 
         await _add_column_if_missing(db, "upgrade_tracking", "download_status", "TEXT")
+        await _add_column_if_missing(db, "series", "missing_count", "INTEGER DEFAULT 0")
+        await _add_column_if_missing(db, "scan_log", "kind", "TEXT DEFAULT 'scan'")
+        await _add_column_if_missing(db, "scan_log", "episodes_seen", "INTEGER DEFAULT 0")
+        await _add_column_if_missing(db, "scan_log", "undetermined", "INTEGER DEFAULT 0")
         await _add_column_if_missing(db, "series", "search_excluded", "INTEGER DEFAULT 0")
         await _add_column_if_missing(db, "series", "title_slug", "TEXT")
         await _add_column_if_missing(db, "search_history", "scan_id", "INTEGER")
@@ -63,6 +67,14 @@ async def init_db(db_path: str) -> None:
         # Indexes on migration-added columns — must run after the ALTER
         # TABLE calls above have actually added those columns.
         await db.executescript(POST_MIGRATION_INDEX_SQL)
+
+        # Backfill kind for rows written before the column existed. Dub-lookup
+        # runs are identifiable by the summary they stored in error_message.
+        await db.execute(
+            """UPDATE scan_log SET kind = 'dub_lookup'
+               WHERE error_message LIKE 'Dub lookup%'"""
+        )
+        await db.execute("UPDATE scan_log SET kind = 'scan' WHERE kind IS NULL")
 
         # Clean up stale 'running' scans from previous container restarts
         await db.execute(

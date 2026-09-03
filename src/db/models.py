@@ -7,10 +7,13 @@ Query helpers return plain dicts (or lists of dicts) for easy JSON serialisation
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -34,6 +37,7 @@ CREATE TABLE IF NOT EXISTS series (
     dubbed_count INTEGER DEFAULT 0,
     sub_only_count INTEGER DEFAULT 0,
     unknown_count INTEGER DEFAULT 0,
+    missing_count INTEGER DEFAULT 0,
     dub_status TEXT DEFAULT 'UNKNOWN',
     search_excluded INTEGER DEFAULT 0,
     dub_available TEXT,
@@ -85,8 +89,11 @@ CREATE TABLE IF NOT EXISTS scan_log (
     started_at TIMESTAMP NOT NULL,
     completed_at TIMESTAMP,
     episodes_checked INTEGER DEFAULT 0,
+    episodes_seen INTEGER DEFAULT 0,
     searches_triggered INTEGER DEFAULT 0,
     errors INTEGER DEFAULT 0,
+    undetermined INTEGER DEFAULT 0,
+    kind TEXT DEFAULT 'scan',
     status TEXT DEFAULT 'running',
     error_message TEXT
 );
@@ -123,6 +130,8 @@ CREATE INDEX IF NOT EXISTS idx_upgrade_episode ON upgrade_tracking(episode_id, r
 CREATE INDEX IF NOT EXISTS idx_episodes_status ON episodes(series_id, dub_status);
 
 CREATE INDEX IF NOT EXISTS idx_upgrade_result ON upgrade_tracking(result);
+
+CREATE INDEX IF NOT EXISTS idx_series_status ON series(dub_status);
 """
 
 # Indexes on columns that are added via migration (see database.py) rather
@@ -134,6 +143,7 @@ POST_MIGRATION_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_upgrade_series ON upgrade_tracking(series_id, result);
 CREATE INDEX IF NOT EXISTS idx_upgrade_scan ON upgrade_tracking(scan_id);
 CREATE INDEX IF NOT EXISTS idx_search_history_scan ON search_history(scan_id);
+CREATE INDEX IF NOT EXISTS idx_scan_log_kind ON scan_log(kind, started_at);
 """
 
 # ---------------------------------------------------------------------------
@@ -150,6 +160,29 @@ def _row_to_dict(row: aiosqlite.Row | None) -> dict | None:
 
 def _rows_to_dicts(rows: list[aiosqlite.Row]) -> list[dict]:
     return [dict(r) for r in rows]
+
+
+# SQLite's compiled-in bound-parameter ceiling is 999 on builds older than
+# 3.32. Anything that binds one parameter per row has to chunk to stay under
+# it, or a library that simply grew past a thousand series starts erroring.
+_SQL_VAR_LIMIT = 900
+
+
+def _chunks(items: list, size: int = _SQL_VAR_LIMIT):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+_LIKE_ESCAPE = "\\"
+
+
+def escape_like(term: str) -> str:
+    """Escape LIKE wildcards so a literal % or _ in a search term matches itself."""
+    return (
+        term.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -232,8 +265,8 @@ async def get_series_filtered(
         conditions.append("dub_status = ?")
         params.append(status)
     if search:
-        conditions.append("title LIKE ?")
-        params.append(f"%{search}%")
+        conditions.append(f"title LIKE ? ESCAPE '{_LIKE_ESCAPE}'")
+        params.append(f"%{escape_like(search)}%")
 
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -276,17 +309,33 @@ async def get_poster_urls_for_series(db: aiosqlite.Connection, series_ids: set[i
     """Batch-fetch poster_url for a set of series IDs in one query."""
     if not series_ids:
         return {}
-    placeholders = ",".join("?" for _ in series_ids)
+    result: dict[int, str | None] = {}
+    for chunk in _chunks(sorted(series_ids)):
+        placeholders = ",".join("?" for _ in chunk)
+        async with db.execute(
+            f"SELECT id, poster_url FROM series WHERE id IN ({placeholders})",
+            tuple(chunk),
+        ) as cur:
+            rows = await cur.fetchall()
+        result.update({r["id"]: r["poster_url"] for r in rows})
+    return result
+
+
+async def update_series_counts(
+    db: aiosqlite.Connection, series_id: int, commit: bool = True
+) -> bool:
+    """Recalculate the series' counts and dub_status from its episodes.
+
+    Returns True if dub_status actually changed, so callers can skip the
+    expensive downstream syncs (Plex collections, Sonarr tags) on the common
+    pass where nothing moved.
+    """
     async with db.execute(
-        f"SELECT id, poster_url FROM series WHERE id IN ({placeholders})",
-        tuple(series_ids),
+        "SELECT dub_status FROM series WHERE id = ?", (series_id,)
     ) as cur:
-        rows = await cur.fetchall()
-    return {r["id"]: r["poster_url"] for r in rows}
+        prev_row = await cur.fetchone()
+    previous = prev_row["dub_status"] if prev_row else None
 
-
-async def update_series_counts(db: aiosqlite.Connection, series_id: int, commit: bool = True) -> None:
-    """Recalculate dubbed/sub_only/unknown counts and dub_status from episodes."""
     async with db.execute(
         """SELECT
                COUNT(*) AS total,
@@ -333,9 +382,9 @@ async def update_series_counts(db: aiosqlite.Connection, series_id: int, commit:
     await db.execute(
         """UPDATE series
            SET total_episodes = ?, dubbed_count = ?, sub_only_count = ?,
-               unknown_count = ?, dub_status = ?
+               unknown_count = ?, missing_count = ?, dub_status = ?
            WHERE id = ?""",
-        (total, dubbed, sub_only, unknown, dub_status, series_id),
+        (total, dubbed, sub_only, unknown, missing, dub_status, series_id),
     )
     if dub_available_override:
         await db.execute(
@@ -345,18 +394,73 @@ async def update_series_counts(db: aiosqlite.Connection, series_id: int, commit:
     if commit:
         await db.commit()
 
+    return previous != dub_status
 
-async def delete_series_not_in(db: aiosqlite.Connection, sonarr_ids: set[int]) -> None:
-    """Delete series whose IDs are not in the given set (orphan cleanup)."""
-    if not sonarr_ids:
-        await db.execute("DELETE FROM series")
-    else:
-        placeholders = ",".join("?" for _ in sonarr_ids)
+
+# A reconciliation pass that would remove most of the library is far more
+# likely to be an upstream failure than a real deletion, so it is refused
+# rather than applied. Small libraries are exempt: dropping 3 of 5 series is
+# a plausible thing for a person to do on purpose.
+_PURGE_FLOOR_ROWS = 10
+_PURGE_FLOOR_FRACTION = 0.5
+
+
+async def delete_series_not_in(db: aiosqlite.Connection, keep_ids: set[int]) -> int:
+    """Delete series whose IDs are not in *keep_ids* (orphan cleanup).
+
+    An empty *keep_ids* is treated as a failed upstream enumeration and is
+    refused: the caller could not have learned that the library is genuinely
+    empty, and applying it would run a bare ``DELETE FROM series`` whose
+    cascades take every episode, audio track, search record and upgrade
+    record with it. Callers that legitimately observed an empty library must
+    not call this at all.
+
+    Returns the number of rows deleted.
+    """
+    if not keep_ids:
+        logger.error(
+            "Refusing to prune series: the caller supplied no IDs to keep, "
+            "which means the upstream listing failed. Nothing was deleted."
+        )
+        return 0
+
+    async with db.execute("SELECT COUNT(*) AS c FROM series") as cur:
+        row = await cur.fetchone()
+    existing = (row["c"] if row else 0) or 0
+
+    keep = list(keep_ids)
+    doomed: set[int] = set()
+    for chunk in _chunks(keep):
+        placeholders = ",".join("?" for _ in chunk)
+        async with db.execute(
+            f"SELECT id FROM series WHERE id NOT IN ({placeholders})", tuple(chunk)
+        ) as cur:
+            rows = await cur.fetchall()
+        candidates = {r["id"] for r in rows}
+        doomed = candidates if not doomed else (doomed & candidates)
+
+    if not doomed:
+        return 0
+
+    if (
+        existing > _PURGE_FLOOR_ROWS
+        and len(doomed) > existing * _PURGE_FLOOR_FRACTION
+    ):
+        logger.error(
+            "Refusing to prune %d of %d series in one pass — that looks like a "
+            "partial upstream listing, not a real deletion. Nothing was deleted.",
+            len(doomed), existing,
+        )
+        return 0
+
+    for chunk in _chunks(sorted(doomed)):
+        placeholders = ",".join("?" for _ in chunk)
         await db.execute(
-            f"DELETE FROM series WHERE id NOT IN ({placeholders})",
-            tuple(sonarr_ids),
+            f"DELETE FROM series WHERE id IN ({placeholders})", tuple(chunk)
         )
     await db.commit()
+    logger.info("Pruned %d series no longer present upstream", len(doomed))
+    return len(doomed)
 
 
 # ---------------------------------------------------------------------------
@@ -425,17 +529,47 @@ async def get_episodes_for_series(
 
 
 async def delete_episodes_not_in(
-    db: aiosqlite.Connection, series_id: int, sonarr_episode_ids: set[int], commit: bool = True
+    db: aiosqlite.Connection,
+    series_id: int,
+    keep_ids: set[int],
+    commit: bool = True,
+    allow_empty: bool = False,
 ) -> None:
-    """Delete episodes for a series whose IDs are not in the given set."""
-    if not sonarr_episode_ids:
+    """Delete episodes for *series_id* whose IDs are not in *keep_ids*.
+
+    An empty *keep_ids* deletes every episode of the series — and cascades
+    into its audio tracks, search history and upgrade records — so it is
+    refused unless the caller passes ``allow_empty=True`` to say it really did
+    observe an empty episode list rather than a failed request.
+    """
+    if not keep_ids:
+        if not allow_empty:
+            logger.warning(
+                "Refusing to clear episodes for series %s: no IDs to keep were "
+                "supplied, which usually means the upstream listing failed.",
+                series_id,
+            )
+            return
         await db.execute("DELETE FROM episodes WHERE series_id = ?", (series_id,))
     else:
-        placeholders = ",".join("?" for _ in sonarr_episode_ids)
-        await db.execute(
-            f"DELETE FROM episodes WHERE series_id = ? AND id NOT IN ({placeholders})",
-            (series_id, *sonarr_episode_ids),
-        )
+        keep = sorted(keep_ids)
+        if len(keep) <= _SQL_VAR_LIMIT:
+            placeholders = ",".join("?" for _ in keep)
+            await db.execute(
+                f"DELETE FROM episodes WHERE series_id = ? AND id NOT IN ({placeholders})",
+                (series_id, *keep),
+            )
+        else:
+            async with db.execute(
+                "SELECT id FROM episodes WHERE series_id = ?", (series_id,)
+            ) as cur:
+                rows = await cur.fetchall()
+            doomed = [r["id"] for r in rows if r["id"] not in keep_ids]
+            for chunk in _chunks(doomed):
+                placeholders = ",".join("?" for _ in chunk)
+                await db.execute(
+                    f"DELETE FROM episodes WHERE id IN ({placeholders})", tuple(chunk)
+                )
     if commit:
         await db.commit()
 
@@ -573,11 +707,17 @@ async def get_search_history(
 # ---------------------------------------------------------------------------
 
 
-async def start_scan_log(db: aiosqlite.Connection) -> int:
-    """Insert a new scan_log row and return its ID."""
+async def start_scan_log(db: aiosqlite.Connection, kind: str = "scan") -> int:
+    """Insert a new scan_log row and return its ID.
+
+    *kind* separates real media scans from the daily dub-availability lookup,
+    which shares this table for its history but is not a scan and must not be
+    what the Overview reports as "last scan".
+    """
     async with db.execute(
-        """INSERT INTO scan_log (started_at, status)
-           VALUES (CURRENT_TIMESTAMP, 'running')"""
+        """INSERT INTO scan_log (started_at, status, kind)
+           VALUES (CURRENT_TIMESTAMP, 'running', ?)""",
+        (kind,),
     ) as cur:
         scan_id = cur.lastrowid
     await db.commit()
@@ -592,17 +732,22 @@ async def complete_scan_log(
     errors: int,
     status: str,
     error_message: str | None = None,
+    episodes_seen: int = 0,
+    undetermined: int = 0,
 ) -> None:
     await db.execute(
         """UPDATE scan_log
            SET completed_at = CURRENT_TIMESTAMP,
                episodes_checked = ?,
+               episodes_seen = ?,
                searches_triggered = ?,
                errors = ?,
+               undetermined = ?,
                status = ?,
                error_message = ?
            WHERE id = ?""",
-        (episodes_checked, searches_triggered, errors, status, error_message, scan_id),
+        (episodes_checked, episodes_seen, searches_triggered, errors,
+         undetermined, status, error_message, scan_id),
     )
     await db.commit()
 
@@ -714,7 +859,7 @@ async def get_overview_stats(db: aiosqlite.Connection) -> dict:
         row = await cur.fetchone()
 
     async with db.execute(
-        "SELECT MAX(started_at) AS last_scan FROM scan_log"
+        "SELECT MAX(started_at) AS last_scan FROM scan_log WHERE kind = 'scan'"
     ) as cur:
         scan_row = await cur.fetchone()
 
@@ -735,7 +880,7 @@ async def get_overview_stats(db: aiosqlite.Connection) -> dict:
 
 
 async def add_ignored_path(
-    db: aiosqlite.Connection, pattern: str, source: str = "manual", note: str = None
+    db: aiosqlite.Connection, pattern: str, source: str = "manual", note: str | None = None
 ) -> None:
     await db.execute(
         "INSERT OR IGNORE INTO ignored_paths (pattern, source, note) VALUES (?, ?, ?)",
@@ -964,7 +1109,7 @@ async def update_dub_availability(
     series_id: int,
     dub_status: str,
     licensors: str,
-    mal_id: int = None,
+    mal_id: int | None = None,
 ) -> None:
     """Update dub availability info from Jikan/MAL lookup."""
     await db.execute(
@@ -1023,6 +1168,23 @@ async def get_dub_expected_series(db: aiosqlite.Connection) -> list[dict]:
            WHERE dub_available IN ('available', 'likely')
              AND dub_status IN ('SUB_ONLY', 'PARTIAL')
            ORDER BY title"""
+    ) as cur:
+        return _rows_to_dicts(await cur.fetchall())
+
+
+async def get_no_dub_series(db: aiosqlite.Connection, limit: int = 200) -> list[dict]:
+    """Series MAL reports no known English dub for."""
+    async with db.execute(
+        "SELECT * FROM series WHERE dub_available = 'unlikely' ORDER BY title LIMIT ?",
+        (limit,),
+    ) as cur:
+        return _rows_to_dicts(await cur.fetchall())
+
+
+async def get_dub_lookup_candidates(db: aiosqlite.Connection) -> list[dict]:
+    """All sub-only/partial series, regardless of existing dub data."""
+    async with db.execute(
+        "SELECT * FROM series WHERE dub_status IN ('SUB_ONLY', 'PARTIAL') ORDER BY title"
     ) as cur:
         return _rows_to_dicts(await cur.fetchall())
 

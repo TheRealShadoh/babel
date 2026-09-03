@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Babel{% endblock %} — Media Dub Monitor</title>
+    <title>{% block title %}Overview{% endblock %} — Babel</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='16' y1='1' x2='16' y2='30' gradientUnits='userSpaceOnUse'><stop offset='0%25' stop-color='%23a855f7'/><stop offset='100%25' stop-color='%232dd4bf'/></linearGradient></defs><polygon points='16,1 18.5,7 13.5,7' fill='url(%23g)'/><polygon points='13.5,8.5 18.5,8.5 19.5,13 12.5,13' fill='url(%23g)'/><polygon points='12,14.5 20,14.5 21.5,19.5 10.5,19.5' fill='url(%23g)'/><polygon points='10,21 22,21 24,26.5 8,26.5' fill='url(%23g)'/><rect x='6' y='27.5' width='20' height='2' rx='0.5' fill='url(%23g)' opacity='0.5'/></svg>">
     <script src="/static/htmx.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -610,22 +610,51 @@
         Babel v{{ babel_version }} &mdash; Media Dub Monitor
     </footer>
 <script>
+// Every timestamp the server renders is UTC. Parse it as UTC and let the
+// browser present it in the viewer's own timezone, so the dashboard never
+// shows two clocks at once.
+function parseUtc(dateStr) {
+    if (!dateStr) return null;
+    const iso = dateStr.trim().replace(' ', 'T');
+    const d = new Date(iso + (/[+-]\d\d:?\d\d$|Z$/.test(iso) ? '' : 'Z'));
+    return isNaN(d.getTime()) ? null : d;
+}
+function localTime(dateStr) {
+    const d = parseUtc(dateStr);
+    return d ? d.toLocaleString() : dateStr;
+}
 function timeAgo(dateStr) {
     if (!dateStr || dateStr === 'Never') return dateStr;
-    const d = new Date(dateStr.replace(' ', 'T') + (dateStr.includes('+') || dateStr.includes('Z') ? '' : 'Z'));
-    const now = new Date();
-    const s = Math.floor((now - d) / 1000);
+    const d = parseUtc(dateStr);
+    if (!d) return dateStr;
+    const s = Math.floor((new Date() - d) / 1000);
+    if (s < 0) {
+        const ahead = Math.abs(s);
+        if (ahead < 60) return 'in under a minute';
+        if (ahead < 3600) return 'in ' + Math.floor(ahead/60) + 'm';
+        if (ahead < 86400) return 'in ' + Math.floor(ahead/3600) + 'h';
+        return 'in ' + Math.floor(ahead/86400) + 'd';
+    }
     if (s < 60) return 'just now';
     if (s < 3600) return Math.floor(s/60) + 'm ago';
     if (s < 86400) return Math.floor(s/3600) + 'h ago';
     if (s < 604800) return Math.floor(s/86400) + 'd ago';
-    return dateStr;
+    return d.toLocaleDateString();
 }
-document.querySelectorAll('[data-timestamp]').forEach(el => {
-    const raw = el.textContent.trim();
-    el.title = raw;
-    el.textContent = timeAgo(raw);
-});
+function renderTimestamps(root) {
+    (root || document).querySelectorAll('[data-timestamp]').forEach(el => {
+        if (el.dataset.tsDone) return;
+        const raw = el.textContent.trim();
+        el.dataset.tsDone = '1';
+        el.title = localTime(raw);
+        el.textContent = el.hasAttribute('data-timestamp-absolute')
+            ? localTime(raw)
+            : timeAgo(raw);
+    });
+}
+renderTimestamps();
+// htmx swaps in fresh markup; re-render anything it brings with it.
+document.body.addEventListener('htmx:afterSwap', e => renderTimestamps(e.target));
 </script>
 </body>
 </html>

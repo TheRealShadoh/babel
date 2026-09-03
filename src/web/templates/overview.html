@@ -380,6 +380,20 @@
         <div class="stat-card__value">{{ stats.empty }}</div>
         <div class="stat-card__label">Empty</div>
     </a>
+    {% if stats.unknown %}
+    <a href="/series?status=UNKNOWN" class="stat-card stat-card--gray" style="text-decoration:none;color:inherit;"
+       title="Audio could not be read for these — usually the media volume is not mounted.">
+        <div class="stat-card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+        </div>
+        <div class="stat-card__value">{{ stats.unknown }}</div>
+        <div class="stat-card__label">Unknown</div>
+    </a>
+    {% endif %}
 </div>
 
 <!-- Scan Control -->
@@ -393,7 +407,7 @@
                     <polyline points="12,6 12,12 16,14"/>
                 </svg>
                 <span class="label">Last scan</span>
-                <span class="value">{{ stats.last_scan_time or "Never" }}</span>
+                <span class="value" {% if stats.last_scan_time %}data-timestamp data-timestamp-absolute{% endif %}>{{ stats.last_scan_time or "Never" }}</span>
             </div>
             <div class="scan-time-row">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -401,7 +415,7 @@
                     <polyline points="12,6 12,12 8,14"/>
                 </svg>
                 <span class="label">Next scan</span>
-                <span class="value">{{ next_scan_time or "Not scheduled" }}</span>
+                <span class="value" {% if next_scan_time %}data-timestamp data-timestamp-absolute{% endif %}>{{ next_scan_time or "Not scheduled" }}</span>
             </div>
         </div>
         <button class="btn-scan"

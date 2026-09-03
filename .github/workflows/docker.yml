@@ -28,7 +28,10 @@ jobs:
           pip install ruff pytest pytest-asyncio
 
       - name: Lint
-        run: ruff check src/ --select F,E9
+        # The project's own ruff config (pyproject.toml), over everything it
+        # ships. The previous --select F,E9 on src/ alone skipped the tests
+        # entirely and dropped rules pyproject asks for.
+        run: ruff check src/ tests/
 
       - name: Test
         run: pytest tests/ -v
@@ -76,6 +79,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BABEL_BUILD=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

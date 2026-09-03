@@ -5,6 +5,7 @@ Babel web routes — FastAPI router for dashboard pages and API endpoints.
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -15,12 +16,50 @@ from src.db.database import get_db
 from src.db import models
 from src.scanner.engine import run_scan, check_download_status, resolve_stuck_imports
 from src.scanner.sonarr import SonarrClient
+from src.web.auth import hash_password
 from src.scanner.plex import PlexClient
 from src.scheduler import get_next_run_time
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# asyncio keeps only a weak reference to a running task, so a fire-and-forget
+# create_task() whose handle is dropped can be collected mid-flight. Anything
+# started from a request holds a strong reference here until it finishes.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+# Rendered into the settings form in place of a stored secret. Submitting the
+# field unchanged (i.e. empty) leaves the stored value alone, so the API key
+# and Plex token never travel back to the browser in the page source.
+SECRET_KEYS = frozenset({"SONARR_API_KEY", "PLEX_TOKEN", "WEBHOOK_SECRET", "AUTH_PASSWORD"})
+
+
+def _to_utc_display(value: str | None) -> str | None:
+    """Normalise a timestamp to naive UTC 'YYYY-MM-DD HH:MM:SS'.
+
+    Everything the DB stores is naive UTC, but APScheduler hands back an
+    offset-aware local time. Rendering the two side by side made a six-hour
+    gap look like two, so both go through here and the browser converts to
+    local time from a single known basis.
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return value
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,6 +87,8 @@ SETTING_KEYS = (
     "AUTO_RESOLVE_IMPORTS",
     "STUCK_IMPORT_DRY_RUN",
     "WEBHOOK_SECRET",
+    "AUTH_USERNAME",
+    "AUTH_PASSWORD",
 )
 
 
@@ -89,15 +130,9 @@ async def overview(request: Request):
     finally:
         await db.close()
 
-    # Format next scan time to human-readable
-    next_scan = get_next_run_time()
-    if next_scan:
-        try:
-            from datetime import datetime
-            dt = datetime.fromisoformat(next_scan)
-            next_scan = dt.strftime("%Y-%m-%d %H:%M:%S")
-        except (ValueError, TypeError):
-            pass
+    # Both timestamps are normalised to UTC here and converted to the
+    # viewer's local time in the browser (see the [data-timestamp] hook).
+    next_scan = _to_utc_display(get_next_run_time())
 
     return _templates(request).TemplateResponse(
         request,
@@ -128,7 +163,17 @@ async def series_list(request: Request):
     per_page = 30
 
     try:
-        all_series, total_count = await models.get_series_filtered(
+        # Count first so an out-of-range ?page= is clamped before the query
+        # runs. Clamping afterwards produced "Page 34 of 34" with no rows on
+        # it, because the offset had already overshot.
+        _, total_count = await models.get_series_filtered(
+            db, status=filter_status, search=search_query,
+            page=1, per_page=0, sort=sort_by,
+        )
+        total_pages = max(1, math.ceil(total_count / per_page))
+        page = min(page, total_pages)
+
+        all_series, _ = await models.get_series_filtered(
             db,
             status=filter_status,
             search=search_query,
@@ -140,11 +185,6 @@ async def series_list(request: Request):
     finally:
         await db.close()
     show_thumbnails = cfg_bool(show_thumbs_val)
-
-    total_pages = max(1, math.ceil(total_count / per_page))
-    # Clamp page to valid range
-    if page > total_pages:
-        page = total_pages
 
     return _templates(request).TemplateResponse(
         request,
@@ -259,16 +299,41 @@ async def settings_page(request: Request, saved: int = 0):
 
     # Start with env defaults, overlay any DB overrides
     current = {}
+    secret_set = {}
     for key in SETTING_KEYS:
         env_val = getattr(settings, key, "")
-        current[key] = db_settings.get(key, str(env_val))
+        value = db_settings.get(key, str(env_val))
+        if key in SECRET_KEYS:
+            # Never render a stored secret into the page. The form submits an
+            # empty field to mean "leave it as it is".
+            secret_set[key] = bool(value) or bool(
+                key == "AUTH_PASSWORD" and db_settings.get("AUTH_PASSWORD_HASH")
+            )
+            value = ""
+        current[key] = value
 
-    flash_message = "Settings saved successfully." if saved else None
+    flash_message = None
+    if saved == 1:
+        flash_message = "Settings saved."
+    elif saved == 2:
+        flash_message = "Could not save settings — check the server logs."
+
+    auth_on = bool(
+        (current.get("AUTH_USERNAME") or settings.AUTH_USERNAME)
+        and (secret_set.get("AUTH_PASSWORD") or settings.AUTH_PASSWORD)
+    )
 
     return _templates(request).TemplateResponse(
         request,
         "settings.html",
-        {"settings": current, "flash_message": flash_message, "ignored_paths": ignored_paths},
+        {
+            "settings": current,
+            "secret_set": secret_set,
+            "flash_message": flash_message,
+            "flash_error": saved == 2,
+            "auth_enabled": auth_on,
+            "ignored_paths": ignored_paths,
+        },
     )
 
 
@@ -279,13 +344,20 @@ async def settings_page(request: Request, saved: int = 0):
 
 @router.post("/api/scan")
 async def trigger_scan(request: Request):
-    from src.scanner.engine import is_scan_running
-    if is_scan_running():
+    from src.scanner.engine import reserve_scan, release_scan_reservation
+    # Reserved synchronously: two clicks landing in the same event-loop tick
+    # would both see an unlocked scan lock and both schedule a scan, because
+    # the first task has not started running yet.
+    if not reserve_scan():
         return HTMLResponse(
             '<div class="flash" style="background-color:rgba(245,158,11,0.15);border:1px solid #f59e0b;padding:0.75rem 1rem;border-radius:6px;color:#f59e0b;">'
             'A scan is already running.</div>'
         )
-    asyncio.create_task(run_scan())
+    try:
+        _spawn(run_scan())
+    except Exception:
+        release_scan_reservation()
+        raise
     logger.info("Scan triggered via web UI")
 
     return HTMLResponse(
@@ -500,8 +572,10 @@ async def toggle_series_exclude(request: Request, series_id: int):
 async def test_sonarr(request: Request):
     form = await request.form()
     settings = get_settings()
-    url = form.get("SONARR_URL", "") or settings.SONARR_URL
-    api_key = form.get("SONARR_API_KEY", "") or settings.SONARR_API_KEY
+    cfg = await get_effective_settings()
+    url = form.get("SONARR_URL", "") or cfg.get("SONARR_URL", "")
+    # The form no longer carries the stored key, so fall back to what is saved.
+    api_key = form.get("SONARR_API_KEY", "") or cfg.get("SONARR_API_KEY", "")
 
     if not url:
         return HTMLResponse(
@@ -529,16 +603,19 @@ async def test_sonarr(request: Request):
         invalidate_effective_settings_cache()
         message += " (saved)"
 
+    if not ok:
+        message = "Could not reach Sonarr. Check the URL and API key, then the server logs."
     color = "#2dd4bf" if ok else "#f43f5e"
-    return HTMLResponse(f'<span style="color:{color}">{message}</span>')
+    return HTMLResponse(f'<span style="color:{color}">{esc(message)}</span>')
 
 
 @router.post("/api/test-plex")
 async def test_plex(request: Request):
     form = await request.form()
     settings = get_settings()
-    url = form.get("PLEX_URL", "") or settings.PLEX_URL
-    token = form.get("PLEX_TOKEN", "") or settings.PLEX_TOKEN
+    cfg = await get_effective_settings()
+    url = form.get("PLEX_URL", "") or cfg.get("PLEX_URL", "")
+    token = form.get("PLEX_TOKEN", "") or cfg.get("PLEX_TOKEN", "")
 
     if not url:
         return HTMLResponse(
@@ -566,8 +643,10 @@ async def test_plex(request: Request):
         invalidate_effective_settings_cache()
         message += " (saved)"
 
+    if not ok:
+        message = "Could not reach Plex. Check the URL and token, then the server logs."
     color = "#2dd4bf" if ok else "#f43f5e"
-    return HTMLResponse(f'<span style="color:{color}">{message}</span>')
+    return HTMLResponse(f'<span style="color:{color}">{esc(message)}</span>')
 
 
 @router.post("/api/setup-sonarr-dub")
@@ -603,16 +682,26 @@ async def save_settings(request: Request):
     form = await request.form()
     settings = get_settings()
     db = await get_db(settings.DB_PATH)
+    ok = True
     try:
         for key in SETTING_KEYS:
             value = form.get(key)
             if key in ("SHOW_THUMBNAILS", "AUTO_TAG_SONARR", "AUTO_COLLECTIONS_PLEX", "AUTO_RESOLVE_IMPORTS", "STUCK_IMPORT_DRY_RUN"):
                 # Checkbox: present = "true", absent = "false"
                 await models.set_setting(db, key, "true" if value else "false")
+            elif key in SECRET_KEYS:
+                # The form never carries the stored secret, so an empty field
+                # means "unchanged" rather than "clear it".
+                if value:
+                    if key == "AUTH_PASSWORD":
+                        await models.set_setting(db, "AUTH_PASSWORD_HASH", hash_password(str(value)))
+                    else:
+                        await models.set_setting(db, key, str(value))
             elif value is not None:
                 await models.set_setting(db, key, str(value))
     except Exception:
         logger.exception("Failed to save settings")
+        ok = False
     finally:
         await db.close()
 
@@ -627,7 +716,7 @@ async def save_settings(request: Request):
         except (ValueError, TypeError):
             logger.warning("Invalid SCAN_INTERVAL_HOURS value: %r", interval_value)
 
-    return RedirectResponse(url="/settings?saved=1", status_code=303)
+    return RedirectResponse(url=f"/settings?saved={1 if ok else 2}", status_code=303)
 
 
 @router.post("/api/ignore-path")
@@ -860,7 +949,7 @@ async def _build_activity_data(sonarr, db) -> dict:
             "series": (item.get("series", {}) or {}).get("title", ""),
             "episode": _fmt_episode(item),
             "status": cat,
-            "progress": min(progress, 100),
+            "progress": max(0, min(progress, 100)),
             "size": _fmt_bytes(size_total),
             "downloaded": _fmt_bytes(size_total - size_left),
             "eta": item.get("timeleft") or "",
@@ -942,10 +1031,10 @@ async def get_activity_html(request: Request):
                 "pending": pending,
             },
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Activity HTML feed error")
         return HTMLResponse(
-            f'<div class="flash flash-error">Error loading activity: {esc(e)}</div>'
+            '<div class="flash flash-error">Could not load activity. Check server logs.</div>'
         )
     finally:
         await sonarr.close()
@@ -1007,12 +1096,7 @@ async def dubs_page(request: Request):
         recently_dubbed = await models.get_recently_dubbed_series(db, days=30)
         dub_expected = await models.get_dub_expected_series(db)
         no_dub_count = await models.get_no_dub_count(db)
-        # Fetch actual no-dub series for the tab
-        async with db.execute(
-            "SELECT * FROM series WHERE dub_available = 'unlikely' ORDER BY title"
-        ) as cur:
-            from src.db.models import _rows_to_dicts
-            no_dub_series = _rows_to_dicts(await cur.fetchall())
+        no_dub_series = await models.get_no_dub_series(db)
     finally:
         await db.close()
 
@@ -1031,24 +1115,27 @@ async def dubs_page(request: Request):
 
 @router.post("/api/lookup-dubs")
 async def lookup_dubs(request: Request):
-    """Trigger dub availability lookup for all sub-only and partial series."""
+    """Start a dub availability lookup for all sub-only and partial series.
+
+    Deliberately not awaited: MyAnimeList has to be polled one series at a
+    time with a courtesy delay, so a few hundred series is several minutes —
+    far longer than any browser or reverse proxy will hold a request open.
+    """
     from src.scanner.dub_lookup import run_dub_lookup
-    result = await run_dub_lookup()
 
-    if result["checked"] == 0:
-        return HTMLResponse(
-            '<div class="flash flash-success">All series already have dub availability info.</div>'
-        )
+    async def _run():
+        try:
+            summary = await run_dub_lookup()
+            logger.info("Dub lookup finished: %s", summary)
+        except Exception:
+            logger.exception("Dub lookup failed")
 
-    html = (
-        f'<div class="flash flash-success">'
-        f'Checked {result["checked"]} series. '
-        f'<span style="color:var(--green);">{result["available"]} dub available</span> &middot; '
-        f'<span style="color:var(--yellow);">{result["likely"]} dub likely</span> &middot; '
-        f'<span style="color:var(--text-muted);">{result["unlikely"]} no known dub</span>'
-        f'</div>'
+    _spawn(_run())
+    return HTMLResponse(
+        '<div class="flash flash-success">Dub lookup started. It runs in the '
+        'background — results appear on this page as series are checked, and '
+        'the run is recorded in History.</div>'
     )
-    return HTMLResponse(html)
 
 
 @router.post("/api/webhook/sonarr")
@@ -1062,7 +1149,9 @@ async def sonarr_webhook(request: Request):
 
     if webhook_key:
         provided = request.query_params.get("apikey", "") or request.headers.get("x-api-key", "")
-        if not hmac.compare_digest(provided, webhook_key):
+        # Encoded first: compare_digest raises TypeError on a str holding
+        # non-ASCII, which turned a bad key into a 500 instead of a 401.
+        if not hmac.compare_digest(provided.encode("utf-8"), str(webhook_key).encode("utf-8")):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
@@ -1103,6 +1192,7 @@ async def sonarr_webhook(request: Request):
 
             # For each episode in the webhook, update its status
             updated = 0
+            unreadable = 0
             for ep in episode_data:
                 ep_id = ep.get("id")
                 if not ep_id:
@@ -1130,6 +1220,18 @@ async def sonarr_webhook(request: Request):
                         for t in tracks:
                             t["source"] = "ffprobe"
 
+                if not tracks:
+                    # ffprobe could not read the file — most often because the
+                    # media volume is not mounted into the container. Say so
+                    # rather than reporting the episode as processed.
+                    unreadable += 1
+                    logger.warning(
+                        "Webhook: could not read audio for %s S%02dE%02d (%s)",
+                        series_title, ep.get("seasonNumber", 0) or 0,
+                        ep.get("episodeNumber", 0) or 0, file_path or "no path",
+                    )
+                    continue
+
                 if tracks and len(tracks) > 0:
                     await models.replace_audio_tracks(db, ep_id, tracks)
                     languages = {t["language"] for t in tracks}
@@ -1151,7 +1253,11 @@ async def sonarr_webhook(request: Request):
         finally:
             await db.close()
 
-        return JSONResponse({"status": "processed", "episodes_updated": updated})
+        return JSONResponse({
+            "status": "processed",
+            "episodes_updated": updated,
+            "episodes_unreadable": unreadable,
+        })
 
     return JSONResponse({"status": "ok"})
 
@@ -1173,14 +1279,25 @@ async def health_check():
     db_path = settings.DB_PATH
     db_size = await asyncio.to_thread(_db_size, db_path)
 
-    db = await get_db(settings.DB_PATH)
+    # The library counts are a convenience on this endpoint, not its purpose:
+    # Docker polls it every 30s purely to learn whether the process is alive.
+    # A locked database during a write-heavy scan must not fail the probe, and
+    # must not silently report zeroes either.
+    stats: dict = {}
+    upgrade_stats: dict = {}
+    stats_ok = True
     try:
-        stats = await models.get_overview_stats(db)
-        upgrade_stats = await models.get_upgrade_stats(db)
-    finally:
-        await db.close()
+        db = await get_db(settings.DB_PATH)
+        try:
+            stats = await models.get_overview_stats(db)
+            upgrade_stats = await models.get_upgrade_stats(db)
+        finally:
+            await db.close()
+    except Exception:
+        stats_ok = False
+        logger.warning("Health check could not read library stats", exc_info=True)
 
-    from src import __version__
+    from src import __version__, __revision__
 
     # A stalled event loop cannot answer this request at all, so reaching here
     # already proves the loop is turning. Reporting the lag still matters: it
@@ -1193,16 +1310,21 @@ async def health_check():
     return JSONResponse(status_code=200 if healthy else 503, content={
         "status": "ok" if healthy else "degraded",
         "version": __version__,
+        "revision": __revision__,
         "loopLagSeconds": round(lag, 3),
         "scanning": is_scan_running(),
-        "lastScan": stats.get("last_scan_time"),
-        "nextScan": get_next_run_time(),
+        "statsAvailable": stats_ok,
+        "lastScan": _to_utc_display(stats.get("last_scan_time")),
+        "nextScan": _to_utc_display(get_next_run_time()),
         "dbSizeBytes": db_size,
-        "series": stats.get("total_series", 0),
-        "dubbed": stats.get("fully_dubbed", 0),
-        "subOnly": stats.get("sub_only", 0),
-        "pendingUpgrades": upgrade_stats.get("pending", 0),
-        "successfulUpgrades": upgrade_stats.get("success", 0),
+        "series": stats.get("total_series") if stats_ok else None,
+        "dubbed": stats.get("fully_dubbed") if stats_ok else None,
+        "subOnly": stats.get("sub_only") if stats_ok else None,
+        "partial": stats.get("partially_dubbed") if stats_ok else None,
+        "unknown": stats.get("unknown") if stats_ok else None,
+        "empty": stats.get("empty") if stats_ok else None,
+        "pendingUpgrades": upgrade_stats.get("pending") if stats_ok else None,
+        "successfulUpgrades": upgrade_stats.get("success") if stats_ok else None,
     })
 
 
@@ -1211,18 +1333,35 @@ async def logs_page(request: Request):
     return _templates(request).TemplateResponse(request, "logs.html", {})
 
 
+# Reading the whole rotating log (up to 5 MB) to show the last screenful was
+# wasteful on every poll, and `?lines=0` — or any negative value — turned
+# `all_lines[-lines:]` into "the entire file".
+_LOG_TAIL_BYTES = 512 * 1024
+_MAX_LOG_LINES = 2000
+
+
 @router.get("/api/logs")
 async def get_logs(request: Request, lines: int = 200, level: str = ""):
-    """Return last N lines of the log file."""
+    """Return the last N lines of the log file."""
     from pathlib import Path
     log_file = Path(__file__).resolve().parent.parent.parent / "data" / "babel.log"
 
+    lines = max(1, min(int(lines), _MAX_LOG_LINES))
+
     def _read() -> list[str] | None:
         try:
-            with open(log_file, errors="replace") as f:
-                return f.readlines()
+            with open(log_file, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - _LOG_TAIL_BYTES))
+                chunk = f.read()
         except FileNotFoundError:
             return None
+        text = chunk.decode("utf-8", errors="replace")
+        if size > _LOG_TAIL_BYTES:
+            # The first line in the window is probably truncated mid-line.
+            text = text.split("\n", 1)[-1]
+        return text.splitlines()
 
     # Off the loop: this opens and reads a file, and no filesystem call belongs
     # on the event loop thread.
@@ -1233,7 +1372,7 @@ async def get_logs(request: Request, lines: int = 200, level: str = ""):
     # Filter by level if specified
     if level:
         level_upper = level.upper()
-        all_lines = [l for l in all_lines if level_upper in l]
+        all_lines = [line for line in all_lines if level_upper in line]
 
     recent = all_lines[-lines:]
 

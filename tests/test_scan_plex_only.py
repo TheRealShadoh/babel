@@ -2,7 +2,6 @@ import pytest
 
 from src.db.database import init_db, get_db
 from src.db import models
-from src.scanner import engine
 from src.scanner.engine import _scan_plex_only, _scan_cancel
 
 from tests.fakes import FakePlex, base_cfg, plex_show, plex_episode

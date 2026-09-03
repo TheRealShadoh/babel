@@ -1,11 +1,19 @@
 import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import PurePosixPath
 
 from plexapi.server import PlexServer
 
 logger = logging.getLogger(__name__)
+
+# Each episode.reload() is an HTTP round trip to Plex, and a library of a few
+# thousand episodes means a few thousand of them served strictly one after the
+# other. They are pure I/O, so fanning them out across a handful of threads
+# turns the dominant cost of a cold scan into a fraction of itself. Kept small
+# deliberately: the point is to hide latency, not to hammer the server.
+_RELOAD_WORKERS = 6
 
 
 class PlexClient:
@@ -107,29 +115,36 @@ class PlexClient:
                 total = len(all_episodes)
                 self._index_progress = {"current": 0, "total": total, "section": section.title}
                 logger.info("  Found %d episodes to index (reloading each for audio streams)...", total)
-                for idx, episode in enumerate(all_episodes):
-                    self._index_progress["current"] = idx + 1
+                def _reload(episode):
                     if self._cancel.is_set():
-                        logger.info("  Plex indexing cancelled at %d/%d", idx, total)
-                        return count
-
+                        return None
                     try:
                         episode.reload()
                     except Exception:
-                        skipped += 1
-                        continue
+                        return False
+                    return episode
 
-                    for media in episode.media:
-                        for part in media.parts:
-                            tracks = self._extract_audio(part)
-                            norm_path = self._normalize_path(part.file)
-                            self._path_index[norm_path] = tracks
-                            filename = norm_path.rsplit("/", 1)[-1] if "/" in norm_path else norm_path
-                            self._name_index[filename] = tracks
-                            count += 1
+                with ThreadPoolExecutor(max_workers=_RELOAD_WORKERS) as pool:
+                    for idx, loaded in enumerate(pool.map(_reload, all_episodes)):
+                        self._index_progress["current"] = idx + 1
+                        if loaded is None:
+                            logger.info("  Plex indexing cancelled at %d/%d", idx, total)
+                            return count
+                        if loaded is False:
+                            skipped += 1
+                            continue
 
-                    if (idx + 1) % 500 == 0:
-                        logger.info("  Indexed %d/%d episodes...", idx + 1, total)
+                        for media in loaded.media:
+                            for part in media.parts:
+                                tracks = self._extract_audio(part)
+                                norm_path = self._normalize_path(part.file)
+                                self._path_index[norm_path] = tracks
+                                filename = norm_path.rsplit("/", 1)[-1] if "/" in norm_path else norm_path
+                                self._name_index[filename] = tracks
+                                count += 1
+
+                        if (idx + 1) % 500 == 0:
+                            logger.info("  Indexed %d/%d episodes...", idx + 1, total)
 
             except Exception as e:
                 logger.warning("Error indexing section '%s': %s", section.title, e)
@@ -279,12 +294,24 @@ class PlexClient:
     def _normalize_path(path: str) -> str:
         return str(PurePosixPath(path.replace("\\", "/"))).lower()
 
-    async def sync_collections(self, series_data: list[dict]) -> dict:
+    async def sync_collections(self, series_data: list[dict], changed: bool = True) -> dict:
         """Update Plex collections based on dub status.
+
         series_data: [{"title": "...", "dub_status": "DUBBED"}, ...]
-        Returns {"collections_updated": N}
+
+        *changed* is False when no series changed status this pass, in which
+        case the whole walk — every show in every section, plus the members of
+        every collection — is skipped. Rebuilding an identical membership list
+        on every scan was pure cost.
+
+        Returns {"collections_updated": N, "skipped": bool}
         """
-        return await asyncio.to_thread(self._sync_collections_impl, series_data)
+        if not changed:
+            logger.info("No dub status changed this scan — skipping Plex collection sync")
+            return {"collections_updated": 0, "skipped": True}
+        result = await asyncio.to_thread(self._sync_collections_impl, series_data)
+        result["skipped"] = False
+        return result
 
     def _sync_collections_impl(self, series_data: list[dict]) -> dict:
         server = self._connect()
@@ -325,13 +352,17 @@ class PlexClient:
                             break
 
                     if existing:
-                        # Get current items and compute diff
-                        current_keys = {item.ratingKey for item in existing.items()}
+                        # Fetch the current items once and diff against that;
+                        # existing.items() is a request per call.
+                        current_items = list(existing.items())
+                        current_keys = {item.ratingKey for item in current_items}
                         target_keys = {s.ratingKey for s in shows}
                         to_add = [s for s in shows if s.ratingKey not in current_keys]
-                        to_remove = [item for item in existing.items() if item.ratingKey not in target_keys]
-                        if to_add: existing.addItems(to_add)
-                        if to_remove: existing.removeItems(to_remove)
+                        to_remove = [i for i in current_items if i.ratingKey not in target_keys]
+                        if to_add:
+                            existing.addItems(to_add)
+                        if to_remove:
+                            existing.removeItems(to_remove)
                     else:
                         section.createCollection(coll_name, items=shows)
 

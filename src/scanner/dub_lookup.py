@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 
 JIKAN_BASE = "https://api.jikan.moe/v4"
 
+# Jikan allows 3 requests/second and 60/minute. The per-minute ceiling is the
+# binding one, and a title that misses the type=tv search spends two requests,
+# so pacing at exactly 60/minute guarantees throttling. Back off further when
+# the server says to.
+DEFAULT_DELAY = 2.0
+MAX_RETRIES = 3
+MAX_BACKOFF = 60.0
+
 # Companies known to produce English dubs
 DUB_LICENSORS = {
     "funimation", "crunchyroll", "sentai filmworks", "aniplex of america",
@@ -41,6 +49,11 @@ async def lookup_dub_info(title: str, client: httpx.AsyncClient | None = None) -
         "mal_id": None, "dub_status": "unknown", "licensors": [],
         "status": None, "aired_from": None, "aired_to": None,
         "episodes": None, "source_title": None,
+        # "ok" separates "MAL answered and knows nothing" from "we never got
+        # an answer". Only the former is worth recording; treating a throttled
+        # request as a real result is what made every lookup report zeroes.
+        "ok": False,
+        "rate_limited": False,
     }
 
     owns_client = client is None
@@ -62,6 +75,8 @@ async def lookup_dub_info(title: str, client: httpx.AsyncClient | None = None) -
             })
             resp.raise_for_status()
             data = resp.json().get("data", [])
+
+        result["ok"] = True
 
         if not data:
             return result
@@ -94,7 +109,12 @@ async def lookup_dub_info(title: str, client: httpx.AsyncClient | None = None) -
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 429:
-            logger.warning("Jikan rate limited, will retry later")
+            result["rate_limited"] = True
+            retry_after = e.response.headers.get("retry-after", "")
+            result["retry_after"] = _parse_retry_after(retry_after)
+            logger.warning(
+                "Jikan rate limited on '%s' (retry-after: %s)", title, retry_after or "unset"
+            )
         else:
             logger.warning("Jikan API error for '%s': %s", title, e)
     except Exception as e:
@@ -104,6 +124,17 @@ async def lookup_dub_info(title: str, client: httpx.AsyncClient | None = None) -
             await client.aclose()
 
     return result
+
+
+def _parse_retry_after(value: str) -> float | None:
+    """Seconds to wait from a Retry-After header, or None if unusable."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, MAX_BACKOFF)
 
 
 def _best_match(title: str, results: list[dict]) -> dict | None:
@@ -120,19 +151,42 @@ def _best_match(title: str, results: list[dict]) -> dict | None:
     return None
 
 
-async def bulk_lookup(titles: list[str], delay: float = 1.0) -> dict[str, dict]:
-    """Look up dub info for multiple titles with rate limiting.
-    Jikan has a 3 requests/second rate limit.
-    Returns: {title: dub_info_dict, ...}
+async def bulk_lookup(
+    items: list[tuple], delay: float = DEFAULT_DELAY, sleep=None
+) -> dict:
+    """Look up dub info for many series, pacing requests and backing off on 429.
+
+    *items* is a list of ``(key, title)`` pairs and the result is keyed by
+    ``key``. Keying by the caller's own identifier rather than by title
+    matters: two series can share a title, and a title-keyed dict silently
+    dropped one of them.
+
+    A rate-limited title is retried with exponential backoff (honouring
+    ``Retry-After`` when present) instead of being recorded as "no dub known".
     """
-    results = {}
+    sleep = sleep or asyncio.sleep
+    results: dict = {}
+    total = len(items)
     async with httpx.AsyncClient(timeout=15) as client:
-        for i, title in enumerate(titles):
-            results[title] = await lookup_dub_info(title, client=client)
-            if i < len(titles) - 1:
-                await asyncio.sleep(delay)  # Rate limit
+        for i, (key, title) in enumerate(items):
+            backoff = delay
+            for attempt in range(MAX_RETRIES):
+                info = await lookup_dub_info(title, client=client)
+                if not info.get("rate_limited"):
+                    break
+                wait = info.get("retry_after") or backoff
+                backoff = min(backoff * 2, MAX_BACKOFF)
+                if attempt < MAX_RETRIES - 1:
+                    logger.info(
+                        "Backing off %.1fs before retrying '%s' (attempt %d/%d)",
+                        wait, title, attempt + 2, MAX_RETRIES,
+                    )
+                    await sleep(wait)
+            results[key] = info
+            if i < total - 1:
+                await sleep(delay)
             if (i + 1) % 10 == 0:
-                logger.info("Dub lookup: %d/%d titles checked", i + 1, len(titles))
+                logger.info("Dub lookup: %d/%d series checked", i + 1, total)
     return results
 
 
@@ -149,19 +203,16 @@ async def run_dub_lookup(force: bool = False) -> dict:
     settings = get_settings()
     cfg = await get_effective_settings()
     db = await get_db(settings.DB_PATH)
-    summary = {"checked": 0, "available": 0, "likely": 0, "unlikely": 0}
+    summary = {"checked": 0, "available": 0, "likely": 0, "unlikely": 0,
+               "unreachable": 0}
 
-    # Log to scan_log as a "dub_lookup" type
-    scan_id = await models.start_scan_log(db)
+    # Recorded in scan_log for history, but tagged so the Overview does not
+    # mistake a dub lookup for the most recent media scan.
+    scan_id = await models.start_scan_log(db, kind="dub_lookup")
 
     try:
         if force:
-            # Re-check all sub-only/partial series regardless of existing data
-            from src.db.models import _rows_to_dicts
-            async with db.execute(
-                "SELECT * FROM series WHERE dub_status IN ('SUB_ONLY', 'PARTIAL') ORDER BY title"
-            ) as cur:
-                series_list = _rows_to_dicts(await cur.fetchall())
+            series_list = await models.get_dub_lookup_candidates(db)
         else:
             series_list = await models.get_series_needing_dub_lookup(db)
 
@@ -170,15 +221,22 @@ async def run_dub_lookup(force: bool = False) -> dict:
                                            "Dub lookup: all series already checked")
             return summary
 
-        titles = [s["title"] for s in series_list]
-        title_to_series = {s["title"]: s for s in series_list}
+        # Keyed by series id, not title: two series can share a title and a
+        # title-keyed map silently dropped one of them.
+        items = [(s["id"], s["title"]) for s in series_list]
+        by_id = {s["id"]: s for s in series_list}
 
-        logger.info("Dub lookup started: %d series to check", len(titles))
-        results = await bulk_lookup(titles, delay=1.0)
+        logger.info("Dub lookup started: %d series to check", len(items))
+        results = await bulk_lookup(items)
 
         newly_available = []
-        for title, info in results.items():
-            series = title_to_series.get(title)
+        for series_id, info in results.items():
+            series = by_id.get(series_id)
+            if not info.get("ok"):
+                # Never reached MAL — leave the stored value and the
+                # dub_checked_at stamp alone so it gets retried.
+                summary["unreachable"] += 1
+                continue
             if series and info["dub_status"] != "unknown":
                 old_status = series.get("dub_available")
                 new_status = info["dub_status"]
@@ -210,12 +268,22 @@ async def run_dub_lookup(force: bool = False) -> dict:
                 )
             logger.info("Dub newly available for %d series", len(newly_available))
 
-        summary["checked"] = len(titles)
-        summary["available"] = sum(1 for r in results.values() if r["dub_status"] == "available")
-        summary["likely"] = sum(1 for r in results.values() if r["dub_status"] == "likely")
-        summary["unlikely"] = sum(1 for r in results.values() if r["dub_status"] == "unlikely")
+        answered = [r for r in results.values() if r.get("ok")]
+        summary["checked"] = len(answered)
+        summary["available"] = sum(1 for r in answered if r["dub_status"] == "available")
+        summary["likely"] = sum(1 for r in answered if r["dub_status"] == "likely")
+        summary["unlikely"] = sum(1 for r in answered if r["dub_status"] == "unlikely")
 
-        msg = f"Dub lookup: {summary['checked']} checked, {summary['available']} available, {summary['likely']} likely, {summary['unlikely']} unlikely"
+        msg = (
+            f"Dub lookup: {summary['checked']} checked, {summary['available']} available, "
+            f"{summary['likely']} likely, {summary['unlikely']} unlikely"
+        )
+        if summary["unreachable"]:
+            msg += f", {summary['unreachable']} unreachable"
+            logger.warning(
+                "%d of %d dub lookups never reached MyAnimeList and were left "
+                "unrecorded for a later retry.", summary["unreachable"], len(results),
+            )
         await models.complete_scan_log(db, scan_id, summary["checked"], 0, 0, "completed", msg)
         logger.info(msg)
 
