@@ -416,9 +416,21 @@ async def _execute_scan() -> dict:
             sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
             sonarr_ok, sonarr_msg = await sonarr.test_connection()
             if not sonarr_ok:
-                logger.warning("Sonarr unreachable: %s", sonarr_msg)
+                # Do NOT fall back to media-server-only mode. That mode keys
+                # series by the media server's own IDs and reconciles against
+                # them, so running it over a Sonarr-keyed library treats every
+                # Sonarr row as an orphan and deletes it — search history and
+                # upgrade records included. A Sonarr that is down is a pass
+                # that cannot run, not a different kind of library.
                 await sonarr.close()
-                sonarr = None
+                msg = (
+                    f"Sonarr is configured but unreachable ({sonarr_msg}). "
+                    "Not scanning: a media-server-only pass would reconcile the "
+                    "library against the wrong IDs. Will retry."
+                )
+                logger.warning(msg)
+                await models.complete_scan_log(db, scan_id, 0, 0, 1, "failed", msg)
+                return {"status": "failed", "error": msg, "retryable": True}
 
         global _plex_client_ref
         media = create_media_group(cfg)
@@ -443,7 +455,7 @@ async def _execute_scan() -> dict:
             )
             logger.error(msg)
             await models.complete_scan_log(db, scan_id, 0, 0, 1, "failed", msg)
-            return {"status": "failed", "error": msg}
+            return {"status": "failed", "error": msg, "retryable": True}
 
         rate_limiter = RateLimiter(int(cfg.get("SEARCH_RATE_LIMIT", 5)))
         cooldown = timedelta(days=int(cfg.get("SEARCH_COOLDOWN_DAYS", 7)))
@@ -637,7 +649,10 @@ async def _scan_media_server_only(db, cfg, plex, target_lang, scan_id) -> dict:
             )
 
     if not cancelled:
-        await models.delete_series_not_in(db, plex_series_ids)
+        # Only this mode's own rows are candidates for pruning. Sonarr-keyed
+        # rows (positive IDs) belong to a different pass and must survive here
+        # even if Sonarr happens to be down right now.
+        await models.delete_series_not_in(db, plex_series_ids, only_negative_ids=True)
     await models.complete_scan_log(
         db, scan_id, episodes_checked, 0, 0,
         "cancelled" if cancelled else "completed",
@@ -794,6 +809,7 @@ async def _process_series_episodes(
     sonarr_episode_ids = set()
     sub_only_to_search = []
     failed_retry_ids = []
+    pending_sizes = await models.get_pending_upgrade_sizes(db)
 
     for ep in episodes:
         sonarr_episode_ids.add(ep["id"])
@@ -808,6 +824,15 @@ async def _process_series_episodes(
             ep["title"], file_path, file_size,
             commit=False,
         )
+
+        if existing_ep and (
+            existing_ep["file_path"] != file_path or existing_ep["file_size"] != file_size
+        ):
+            # The cached tracks describe the old file. Forget them now, before
+            # any probe: if the new file cannot be read this pass, the next pass
+            # would otherwise see matching path/size and trust the stale rows,
+            # classifying the new file by the old one's audio forever.
+            await models.delete_audio_tracks(db, ep["id"], commit=False)
 
         if not file_path:
             await models.update_episode_status(db, ep["id"], "MISSING", commit=False)
@@ -837,11 +862,22 @@ async def _process_series_episodes(
             continue
 
         # Detect if file changed (potential upgrade)
-        file_changed = (
+        file_changed = bool(
             existing_ep
             and existing_ep["file_size"] is not None
             and existing_ep["file_size"] != file_size
             and existing_ep["dub_status"] == "SUB_ONLY"
+        )
+        # An upgrade first seen on a pass that could not read the new file is
+        # still unverified: the row is UNKNOWN with the new size already
+        # stored, so file_changed is False. Compare against the size recorded
+        # when the search was made instead.
+        upgrade_to_verify = file_changed or bool(
+            existing_ep
+            and existing_ep["dub_status"] == "UNKNOWN"
+            and ep["id"] in pending_sizes
+            and pending_sizes[ep["id"]] is not None
+            and pending_sizes[ep["id"]] != file_size
         )
 
         stats.episodes_checked += 1
@@ -862,8 +898,8 @@ async def _process_series_episodes(
 
         await models.update_episode_status(db, ep["id"], status, commit=False)
 
-        # Upgrade tracking: resolve pending upgrades when file changes
-        if file_changed:
+        # Upgrade tracking: resolve pending upgrades once the new file is read
+        if upgrade_to_verify:
             if status == "DUBBED":
                 await models.resolve_upgrade(db, ep["id"], file_size, status, "success", commit=False)
                 stats.upgrades_succeeded += 1
@@ -875,6 +911,16 @@ async def _process_series_episodes(
                 })
                 logger.info(
                     "  ✅ Upgrade SUCCESS: %s S%02dE%02d — now dubbed!",
+                    series["title"], ep["seasonNumber"] or 0, ep["episodeNumber"] or 0,
+                )
+            elif status == "UNKNOWN":
+                # The new file could not be read this pass (media server has
+                # not indexed it yet, or ffprobe cannot reach it). That is not
+                # evidence the upgrade failed, so leave the record pending and
+                # do not ask Sonarr for yet another release on its account.
+                logger.info(
+                    "  ⏳ Upgrade unverified: %s S%02dE%02d — new file not readable yet, "
+                    "will re-check next scan",
                     series["title"], ep["seasonNumber"] or 0, ep["episodeNumber"] or 0,
                 )
             else:
@@ -1117,6 +1163,17 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
                 stats.errors += 1
                 continue
             fileless.append((series, episodes))
+            continue
+
+        if not episodes:
+            # Files without episodes is the mirror of the restart case guarded
+            # above: acting on it would delete every episode row of the series.
+            logger.warning(
+                "Skipping %s — Sonarr listed %d files but no episodes; treating "
+                "the answer as transient", series["title"], len(episode_files),
+            )
+            reconcile_ok = False
+            stats.errors += 1
             continue
 
         stats.episodes_seen += len(episodes)
