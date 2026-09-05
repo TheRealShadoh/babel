@@ -229,7 +229,7 @@ async def _diagnose_ignores(checks: list[dict]) -> None:
         async with db.execute("SELECT COUNT(*) AS c FROM episodes") as cur:
             row = await cur.fetchone()
         episode_count = (row["c"] if row else 0) or 0
-        scans = await models.get_scan_logs(db, limit=1)
+        scans = [row for row in await models.get_scan_logs(db, limit=20) if row.get("kind") == "scan"][:1]
     finally:
         await db.close()
 

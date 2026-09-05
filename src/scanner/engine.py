@@ -119,6 +119,20 @@ class ScanStats:
     successful_upgrades: list = field(default_factory=list)
 
 
+def _parse_sonarr_time(value) -> datetime | None:
+    """Sonarr's ISO timestamps and SQLite's CURRENT_TIMESTAMP, both as aware UTC."""
+    if not value:
+        return None
+    text = str(value).replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 async def check_download_status() -> dict:
     """Check Sonarr queue and history for episodes Babel searched.
 
@@ -185,8 +199,16 @@ async def check_download_status() -> dict:
                     if dl_status != "importing":
                         continue
 
-                # 2. Check history for this episode
+                # 2. Check history for this episode — only events since the
+                # search was made. The episode already has a file, so its
+                # original import is always in history; taking that as the
+                # answer marked every search "imported".
                 history = await sonarr.get_history_for_episode(episode_id)
+                since = _parse_sonarr_time(record.get("triggered_at"))
+                history = [
+                    e for e in history
+                    if since is None or (_parse_sonarr_time(e.get("date")) or since) >= since
+                ]
                 if not history:
                     await models.update_download_status(db, episode_id, "no_results")
                     summary["no_results"] += 1
@@ -648,7 +670,14 @@ async def _scan_media_server_only(db, cfg, plex, target_lang, scan_id) -> dict:
                 last_log=f"[{i}/{total_series}] {series['title']} — {dub_pct}% dubbed",
             )
 
-    if not cancelled:
+    if cancelled:
+        pass
+    elif getattr(plex, "partial", False):
+        logger.warning(
+            "Skipping orphan cleanup — the %s library read was incomplete, so a "
+            "missing show may just be one that failed to load.", label,
+        )
+    else:
         # Only this mode's own rows are candidates for pruning. Sonarr-keyed
         # rows (positive IDs) belong to a different pass and must survive here
         # even if Sonarr happens to be down right now.
@@ -796,6 +825,9 @@ async def _classify_episode_audio(
     return status
 
 
+_COMMIT_EVERY = 25
+
+
 async def _process_series_episodes(
     db, cfg, series, episodes, file_map, plex, cooldown, target_lang,
     ignore_patterns, series_excluded, stats: ScanStats,
@@ -811,7 +843,14 @@ async def _process_series_episodes(
     failed_retry_ids = []
     pending_sizes = await models.get_pending_upgrade_sizes(db)
 
-    for ep in episodes:
+    for index, ep in enumerate(episodes, 1):
+        if index % _COMMIT_EVERY == 0:
+            # Writes are batched per series for speed, but a long series with
+            # slow probes would otherwise hold SQLite's write lock for minutes
+            # and every Settings save or webhook in that window would fail
+            # with "database is locked". Rows are upserts, so partial commits
+            # are safe.
+            await db.commit()
         sonarr_episode_ids.add(ep["id"])
         file_info = file_map.get(ep["episodeFileId"]) if ep["hasFile"] else None
         file_path = file_info["path"] if file_info else None
@@ -1276,6 +1315,8 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
             "Skipping orphan cleanup — at least one Sonarr request failed, so the "
             "series list seen this pass is incomplete."
         )
+    elif not sonarr_series_ids:
+        pass  # nothing matched the filter; already reported above
     else:
         await models.delete_series_not_in(db, sonarr_series_ids)
 

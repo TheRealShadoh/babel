@@ -170,6 +170,14 @@ async def get_audio_tracks(
         )
         return None
 
+    # ffprobe treats a bare argument as an input URL and a leading dash as an
+    # option. Every path Babel probes is a translated absolute local path, so
+    # anything else (a URL from a forged webhook, "-foo") is refused outright
+    # rather than handed to the binary.
+    if not file_path.startswith("/") or "://" in file_path:
+        logger.warning("Refusing to probe non-local path: %r", file_path[:120])
+        return None
+
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(

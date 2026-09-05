@@ -67,6 +67,8 @@ class JellyfinClient:
         self._index_progress = {"current": 0, "total": 0, "section": ""}
         self._user_id: str | None = None
         self._user_id_resolved = False
+        # Set when a paginated read stopped early; see PlexClient.partial.
+        self.partial = False
 
     # ------------------------------------------------------------------
     # Connection
@@ -128,6 +130,7 @@ class JellyfinClient:
                 data = resp.json()
             except httpx.HTTPError as e:
                 logger.error("Failed to fetch Jellyfin items (startIndex=%d): %s", start, e)
+                self.partial = True
                 break
             page = data.get("Items", [])
             items.extend(page)
@@ -424,21 +427,31 @@ class JellyfinClient:
         return {i["Name"].lower(): i["Id"] for i in items if i.get("Name") and i.get("Id")}
 
     async def _create_collection(self, name: str, ids: list[str]) -> str | None:
+        first, rest = ids[:self._COLLECTION_BATCH], ids[self._COLLECTION_BATCH:]
         try:
             resp = await self.client.post(
-                "/Collections", params={"name": name, "ids": ",".join(ids)}
+                "/Collections", params={"name": name, "ids": ",".join(first)}
             )
             resp.raise_for_status()
-            return resp.json().get("Id")
+            collection_id = resp.json().get("Id")
+            if collection_id and rest:
+                await self._collection_items("POST", collection_id, rest)
+            return collection_id
         except httpx.HTTPError as e:
             logger.warning("Failed to create Jellyfin collection '%s': %s", name, e)
             return None
 
+    # Item IDs travel in the query string; a few hundred GUIDs overrun the
+    # server's request-line limit and every sync of a big collection 414s.
+    _COLLECTION_BATCH = 50
+
     async def _collection_items(self, method: str, collection_id: str, ids: list[str]) -> None:
-        resp = await self.client.request(
-            method, f"/Collections/{collection_id}/Items", params={"ids": ",".join(ids)}
-        )
-        resp.raise_for_status()
+        for start in range(0, len(ids), self._COLLECTION_BATCH):
+            batch = ids[start:start + self._COLLECTION_BATCH]
+            resp = await self.client.request(
+                method, f"/Collections/{collection_id}/Items", params={"ids": ",".join(batch)}
+            )
+            resp.raise_for_status()
 
     # ------------------------------------------------------------------
     # Misc

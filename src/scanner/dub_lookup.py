@@ -15,7 +15,9 @@ find out" are different answers, and only the first one is ever recorded.
 """
 
 import asyncio
+import difflib
 import logging
+import re
 
 import httpx
 
@@ -103,10 +105,18 @@ async def lookup_dub_info(title: str, client: httpx.AsyncClient | None = None) -
         if not data:
             return result
 
-        # Find best title match
+        # Find best title match. Never fall back to the first hit blindly:
+        # "Naruto" would inherit Naruto Shippuden's licensors and mal_id, and
+        # a wrong "unlikely" parks a series on the No-Dub list for a month.
         anime = _best_match(title, data)
         if not anime:
-            anime = data[0]
+            anime = _close_match(title, data)
+        if not anime:
+            logger.info(
+                "No MAL entry matches %r closely enough (candidates: %s)",
+                title, ", ".join(a.get("title", "?") for a in data[:3]),
+            )
+            return result
 
         result["mal_id"] = anime.get("mal_id")
         result["source_title"] = anime.get("title")
@@ -237,6 +247,33 @@ async def corroborate_with_ann(
             await client.aclose()
 
     return changed
+
+
+# How similar a MAL title has to be to a Sonarr title to count as the same
+# show when no title field matches exactly. Punctuation, casing and a
+# trailing year are normalised away first, so this is about real wording.
+_CLOSE_MATCH_RATIO = 0.85
+
+
+def _loose(title: str) -> str:
+    text = re.sub(r"\(\d{4}\)\s*$", "", (title or "").lower())
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _close_match(title: str, results: list[dict]) -> dict | None:
+    """The candidate whose title is nearly *title*, or None."""
+    wanted = _loose(title)
+    if not wanted:
+        return None
+    best, best_ratio = None, 0.0
+    for anime in results:
+        names = [anime.get("title"), anime.get("title_english")]
+        names += [t.get("title") for t in anime.get("titles", [])]
+        for name in filter(None, names):
+            ratio = difflib.SequenceMatcher(None, wanted, _loose(name)).ratio()
+            if ratio > best_ratio:
+                best, best_ratio = anime, ratio
+    return best if best_ratio >= _CLOSE_MATCH_RATIO else None
 
 
 async def bulk_lookup(

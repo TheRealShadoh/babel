@@ -16,9 +16,11 @@ its settings, because the dashboard has no per-request token and, by default,
 no authentication either.
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac
+import time
 import logging
 import os
 import secrets
@@ -66,6 +68,35 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
+# A PBKDF2 check costs tens of milliseconds of CPU. The dashboard polls every
+# few seconds, so verifying on every request would block the event loop —
+# stalling scans and, under a request flood, tripping the watchdog. The check
+# runs in a thread, and a successful verification is remembered briefly so
+# the polls are free. Only a digest of the credentials is kept, never the
+# password itself.
+_VERIFIED_TTL = 60.0
+_verified: dict[str, float] = {}
+_verified_lock = asyncio.Lock()
+
+
+async def _verify_password_cached(password: str, password_hash: str) -> bool:
+    key = hashlib.sha256(f"{password_hash}\0{password}".encode("utf-8")).hexdigest()
+    now = time.monotonic()
+    async with _verified_lock:
+        expires = _verified.get(key)
+        if expires is not None and expires > now:
+            return True
+    ok = await asyncio.to_thread(verify_password, password, password_hash)
+    if ok:
+        async with _verified_lock:
+            # Bound the cache: a flood of wrong passwords never populates it,
+            # and a flood of right ones is the operator's own polling.
+            if len(_verified) > 64:
+                _verified.clear()
+            _verified[key] = now + _VERIFIED_TTL
+    return ok
+
+
 def _constant_time_equals(a: str, b: str) -> bool:
     """Compare two strings without leaking their length through timing.
 
@@ -98,8 +129,14 @@ async def _credentials() -> tuple[str, str, str]:
         settings = get_settings()
         return settings.AUTH_USERNAME, settings.AUTH_PASSWORD, settings.AUTH_PASSWORD_HASH
 
+    # The environment always wins, for the username as well as the password.
+    # Effective settings overlay DB values on env defaults, so without this a
+    # username cleared on the Settings page would switch auth off despite
+    # AUTH_USERNAME being set in the container — the README promises the
+    # opposite.
+    settings = get_settings()
     return (
-        cfg.get("AUTH_USERNAME", "") or "",
+        settings.AUTH_USERNAME or cfg.get("AUTH_USERNAME", "") or "",
         cfg.get("AUTH_PASSWORD", "") or "",
         cfg.get("AUTH_PASSWORD_HASH", "") or "",
     )
@@ -126,7 +163,7 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
             if password:
                 pass_ok = _constant_time_equals(given_pass, password)
             else:
-                pass_ok = verify_password(given_pass, password_hash)
+                pass_ok = await _verify_password_cached(given_pass, password_hash)
             if user_ok and pass_ok:
                 return await call_next(request)
 

@@ -48,7 +48,7 @@ All settings can be configured via environment variables or the web UI (Settings
 | `SONARR_API_KEY` | — | Sonarr API key |
 | `PLEX_URL` | — | Plex server URL |
 | `PLEX_TOKEN` | — | Plex authentication token |
-| `JELLYFIN_URL` | — | Jellyfin server URL (alternative to Plex) |
+| `JELLYFIN_URL` | — | Jellyfin server URL (alongside Plex or instead of it) |
 | `JELLYFIN_API_KEY` | — | Jellyfin API key (Dashboard > API Keys) |
 | `MEDIA_SERVER` | `auto` | `auto` uses every configured server; `plex`/`jellyfin` restrict to one; `none` disables both |
 | `SCAN_INTERVAL_HOURS` | `6` | Hours between automatic scans |
@@ -58,11 +58,18 @@ All settings can be configured via environment variables or the web UI (Settings
 | `AUTO_MONITOR_DUBS` | `true` | Monitor episodes in Sonarr once a dub is available |
 | `DUB_LOOKUP_ANN` | `true` | Check Anime News Network when MyAnimeList is inconclusive |
 | `DISCORD_WEBHOOK_URL` | — | Discord webhook for notifications |
+| `SONARR_PATH_PREFIX` / `LOCAL_PATH_PREFIX` | — / `/media` | Map the root Sonarr reports to where it is mounted in the container |
+| `WEBHOOK_SECRET` | — | Required `?apikey=` on the Sonarr webhook — set it |
+| `AUTH_USERNAME` / `AUTH_PASSWORD` | — | HTTP Basic Auth for the dashboard |
+
+The full list, including path mapping, ffprobe and watchdog tuning, is in the
+[README](https://github.com/TheRealShadoh/babel#configuration).
 
 ## Unraid
 
-Install via Community Applications or manually using the template at:
-`https://github.com/TheRealShadoh/babel/tree/master/unraid`
+Import the container template from
+`https://github.com/TheRealShadoh/babel/blob/master/templates/babel.xml`,
+or add the container by hand as described in the README.
 
 ## Links
 

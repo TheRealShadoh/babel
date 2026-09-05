@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from src import __version__
-from src.config import get_settings
+from src.config import get_settings, log_file_path
 from src.db.database import init_db
 from src.scheduler import start_scheduler, stop_scheduler
 from src.watchdog import start_watchdog, stop_watchdog
@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     # duplicate handlers and duplicate every log line.
     root_logger = logging.getLogger()
     if not any(getattr(h, "name", None) == _LOG_FILE_HANDLER_NAME for h in root_logger.handlers):
-        log_file = Path(__file__).parent.parent / "data" / "babel.log"
+        log_file = log_file_path(settings.DB_PATH)
         log_file.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(
             str(log_file), maxBytes=5*1024*1024, backupCount=3

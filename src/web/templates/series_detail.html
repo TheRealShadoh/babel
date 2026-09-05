@@ -411,7 +411,7 @@
                         {% if ep.dub_status == "SUB_ONLY" %}
                             <button class="btn btn-sm btn-success"
                                     hx-post="/api/search/{{ ep.id }}"
-                                    hx-target="closest tr"
+                                    hx-target="this"
                                     hx-swap="outerHTML">
                                 <span class="htmx-indicator"><span class="spinner"></span></span>
                                 Search

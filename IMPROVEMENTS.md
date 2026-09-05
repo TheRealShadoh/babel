@@ -1,4 +1,10 @@
-# Babel — Code Review & Improvement Task List
+# Babel — Code Review & Improvement Task List (v1.1.0 review, historical)
+
+> This is the record of the review done against v1.1.0 and is kept for
+> history. It is not current: see `CHANGELOG.md` for what has shipped
+> since, including the 1.2.x production review that found and fixed the
+> Sonarr-restart data loss, the media-only fallback pruning, and the
+> issues listed there. The test suite is now 190+ tests across 20 files.
 
 Ground-up review of v1.1.0 (7dc1768). Tasks are ordered by priority within each tier:
 **P0** = bugs / data-loss risks, **P1** = security, **P2** = performance & robustness,
