@@ -40,7 +40,7 @@ def _spawn(coro) -> asyncio.Task:
 # Rendered into the settings form in place of a stored secret. Submitting the
 # field unchanged (i.e. empty) leaves the stored value alone, so the API key
 # and Plex token never travel back to the browser in the page source.
-SECRET_KEYS = frozenset({"SONARR_API_KEY", "PLEX_TOKEN", "WEBHOOK_SECRET", "AUTH_PASSWORD"})
+SECRET_KEYS = frozenset({"SONARR_API_KEY", "PLEX_TOKEN", "JELLYFIN_API_KEY", "WEBHOOK_SECRET", "AUTH_PASSWORD"})
 
 
 def _to_utc_display(value: str | None) -> str | None:
@@ -70,6 +70,9 @@ SETTING_KEYS = (
     "SONARR_API_KEY",
     "PLEX_URL",
     "PLEX_TOKEN",
+    "JELLYFIN_URL",
+    "JELLYFIN_API_KEY",
+    "MEDIA_SERVER",
     "SCAN_INTERVAL_HOURS",
     "TARGET_LANGUAGE",
     "SEARCH_COOLDOWN_DAYS",
@@ -77,6 +80,7 @@ SETTING_KEYS = (
     "SONARR_PATH_PREFIX",
     "LOCAL_PATH_PREFIX",
     "PLEX_PATH_PREFIX",
+    "JELLYFIN_PATH_PREFIX",
     "ANIME_FILTER",
     "LOG_LEVEL",
     "SHOW_THUMBNAILS",
@@ -85,6 +89,7 @@ SETTING_KEYS = (
     "DISCORD_WEBHOOK_URL",
     "AUTO_COLLECTIONS_PLEX",
     "AUTO_RESOLVE_IMPORTS",
+    "AUTO_MONITOR_DUBS",
     "STUCK_IMPORT_DRY_RUN",
     "WEBHOOK_SECRET",
     "AUTH_USERNAME",
@@ -649,6 +654,47 @@ async def test_plex(request: Request):
     return HTMLResponse(f'<span style="color:{color}">{esc(message)}</span>')
 
 
+@router.post("/api/test-jellyfin")
+async def test_jellyfin(request: Request):
+    from src.scanner.jellyfin import JellyfinClient
+
+    form = await request.form()
+    settings = get_settings()
+    cfg = await get_effective_settings()
+    url = form.get("JELLYFIN_URL", "") or cfg.get("JELLYFIN_URL", "")
+    api_key = form.get("JELLYFIN_API_KEY", "") or cfg.get("JELLYFIN_API_KEY", "")
+
+    if not url:
+        return HTMLResponse(
+            '<span style="color:#e17055">Jellyfin URL is required.</span>'
+        )
+
+    jellyfin = JellyfinClient(url, api_key)
+    try:
+        ok, message = await jellyfin.test_connection()
+    except Exception as e:
+        logger.warning("Jellyfin connection test failed: %s", e)
+        ok, message = False, "Connection test failed. Check server logs."
+    finally:
+        await jellyfin.close()
+
+    if ok:
+        db = await get_db(settings.DB_PATH)
+        try:
+            await models.set_setting(db, "JELLYFIN_URL", url)
+            await models.set_setting(db, "JELLYFIN_API_KEY", api_key)
+        finally:
+            await db.close()
+        from src.config import invalidate_effective_settings_cache
+        invalidate_effective_settings_cache()
+        message += " (saved)"
+    else:
+        message = "Could not reach Jellyfin. Check the URL and API key, then the server logs."
+
+    color = "#2dd4bf" if ok else "#f43f5e"
+    return HTMLResponse(f'<span style="color:{color}">{esc(message)}</span>')
+
+
 @router.post("/api/setup-sonarr-dub")
 async def setup_sonarr_dub(request: Request):
     """Auto-configure Sonarr to prefer dubbed releases."""
@@ -686,7 +732,8 @@ async def save_settings(request: Request):
     try:
         for key in SETTING_KEYS:
             value = form.get(key)
-            if key in ("SHOW_THUMBNAILS", "AUTO_TAG_SONARR", "AUTO_COLLECTIONS_PLEX", "AUTO_RESOLVE_IMPORTS", "STUCK_IMPORT_DRY_RUN"):
+            if key in ("SHOW_THUMBNAILS", "AUTO_TAG_SONARR", "AUTO_COLLECTIONS_PLEX",
+                       "AUTO_RESOLVE_IMPORTS", "AUTO_MONITOR_DUBS", "STUCK_IMPORT_DRY_RUN"):
                 # Checkbox: present = "true", absent = "false"
                 await models.set_setting(db, key, "true" if value else "false")
             elif key in SECRET_KEYS:
@@ -771,19 +818,30 @@ def _render_ignore_list(paths: list[dict]) -> HTMLResponse:
 
 @router.get("/api/discover/plex")
 async def discover_plex(request: Request):
-    """Return Plex libraries as JSON for the settings UI."""
-    cfg = await get_effective_settings()
-    if not cfg.get("PLEX_URL") or not cfg.get("PLEX_TOKEN"):
-        return JSONResponse({"error": "Plex not configured"}, status_code=400)
+    """Return the configured media server's libraries as JSON for the settings UI.
 
-    plex = PlexClient(cfg["PLEX_URL"], cfg["PLEX_TOKEN"])
+    Still served from the historical /api/discover/plex path so existing
+    bookmarks and the settings page keep working, but it now reports whichever
+    of Plex/Jellyfin is in use.
+    """
+    from src.scanner.media_server import create_media_client, server_label
+
+    cfg = await get_effective_settings()
+    client, kind = create_media_client(cfg)
+    if client is None:
+        return JSONResponse({"error": "No media server configured"}, status_code=400)
+
+    label = server_label(kind)
     try:
-        libraries = await plex.get_libraries()
+        libraries = await client.get_libraries()
     except Exception as e:
-        logger.exception("Failed to discover Plex libraries: %s", e)
-        return JSONResponse({"error": "Failed to discover Plex libraries. Check server logs."}, status_code=500)
+        logger.exception("Failed to discover %s libraries: %s", label, e)
+        return JSONResponse(
+            {"error": f"Failed to discover {label} libraries. Check server logs."},
+            status_code=500,
+        )
     finally:
-        await plex.close()
+        await client.close()
 
     # Check which ones are currently ignored
     settings = get_settings()
@@ -801,7 +859,7 @@ async def discover_plex(request: Request):
             else False
         )
 
-    return JSONResponse({"libraries": libraries})
+    return JSONResponse({"libraries": libraries, "server": label})
 
 
 @router.get("/api/discover/sonarr")
@@ -841,6 +899,61 @@ async def discover_sonarr(request: Request):
         tag["ignored"] = any(p in tag["label"].lower() for p in ignored_patterns)
 
     return JSONResponse({"root_folders": root_folders, "tags": tags})
+
+
+@router.get("/api/diagnostics")
+async def diagnostics_json(request: Request):
+    """Machine-readable "why is Babel finding nothing" report."""
+    from src.scanner.diagnostics import run_diagnostics
+
+    try:
+        return JSONResponse(await run_diagnostics())
+    except Exception:
+        logger.exception("Diagnostics failed")
+        return JSONResponse({"error": "Diagnostics failed. Check server logs."}, status_code=500)
+
+
+@router.post("/api/diagnostics/html")
+async def diagnostics_html(request: Request):
+    """Same report, rendered for the Settings page."""
+    from src.scanner.diagnostics import run_diagnostics
+
+    try:
+        report = await run_diagnostics()
+    except Exception:
+        logger.exception("Diagnostics failed")
+        return HTMLResponse(
+            '<div class="flash flash-error">Diagnostics failed. Check server logs.</div>'
+        )
+
+    colors = {"ok": "#2dd4bf", "warn": "#fbbf24", "error": "#f43f5e", "info": "var(--text-muted)"}
+    icons = {"ok": "✓", "warn": "!", "error": "×", "info": "·"}
+
+    rows = []
+    for check in report["checks"]:
+        color = colors.get(check["level"], "var(--text-muted)")
+        hint = (
+            f'<div style="font-size:0.72rem;color:var(--text-muted);margin-top:0.15rem;">'
+            f'{esc(check["hint"])}</div>'
+            if check.get("hint") else ""
+        )
+        rows.append(
+            f'<div style="padding:0.4rem 0;border-bottom:1px solid var(--border-color);">'
+            f'<div style="font-size:0.8rem;">'
+            f'<span style="color:{color};font-weight:700;margin-right:0.4rem;">{icons.get(check["level"], "·")}</span>'
+            f'<strong style="color:var(--text-primary);">{esc(check["name"])}</strong>'
+            f'<span style="color:var(--text-muted);"> — {esc(check["message"])}</span>'
+            f'</div>{hint}</div>'
+        )
+
+    summary = report["summary"]
+    headline = (
+        f'{summary["ok"]} ok, {summary["warnings"]} warning(s), {summary["errors"]} error(s)'
+    )
+    return HTMLResponse(
+        f'<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.4rem;">{headline}</div>'
+        + "".join(rows)
+    )
 
 
 @router.get("/api/scan/progress")

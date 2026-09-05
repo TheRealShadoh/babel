@@ -97,6 +97,37 @@
                 </button>
                 <span id="plex-st" style="font-size:0.78rem;margin-left:0.3rem;"></span>
             </div>
+            <!-- Jellyfin -->
+            <div style="margin-bottom:0.5rem;">
+                <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Jellyfin</div>
+                <div class="form-row">
+                    <div class="form-group" style="margin-bottom:0.35rem;">
+                        <input type="text" name="JELLYFIN_URL" class="form-control" value="{{ settings.JELLYFIN_URL or '' }}" placeholder="http://localhost:8096" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0.35rem;">
+                        <input type="password" name="JELLYFIN_API_KEY" class="form-control" value="" autocomplete="off"
+                               placeholder="{{ 'Saved — leave blank to keep' if secret_set.JELLYFIN_API_KEY else 'API Key' }}" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                    </div>
+                </div>
+                <button type="button" class="btn btn-sm btn-primary" style="font-size:0.72rem;padding:0.2rem 0.5rem;"
+                        hx-post="/api/test-jellyfin" hx-target="#jellyfin-st" hx-swap="innerHTML" hx-include="[name='JELLYFIN_URL'],[name='JELLYFIN_API_KEY']">
+                    Test <span class="htmx-indicator"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;"></span></span>
+                </button>
+                <span id="jellyfin-st" style="font-size:0.78rem;margin-left:0.3rem;"></span>
+                <div class="helper-text">Jellyfin &rarr; Dashboard &rarr; API Keys &rarr; +</div>
+            </div>
+            <!-- Media server choice -->
+            <div style="margin-bottom:0.75rem;">
+                <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Media Server</div>
+                <select name="MEDIA_SERVER" class="form-control" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                    {% set ms = settings.MEDIA_SERVER or 'auto' %}
+                    <option value="auto" {% if ms == 'auto' %}selected{% endif %}>Auto — use whichever is configured (Plex first)</option>
+                    <option value="plex" {% if ms == 'plex' %}selected{% endif %}>Plex</option>
+                    <option value="jellyfin" {% if ms == 'jellyfin' %}selected{% endif %}>Jellyfin</option>
+                    <option value="none" {% if ms == 'none' %}selected{% endif %}>None — ffprobe only</option>
+                </select>
+                <div class="helper-text">Which server supplies audio track data. Only one is used per scan.</div>
+            </div>
             <!-- Discord -->
             <div style="margin-bottom:0.75rem;">
                 <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Discord Notifications</div>
@@ -178,6 +209,7 @@
                 <div class="form-group">
                     <label style="font-size:0.78rem;color:var(--text-muted);">Anime Filter</label>
                     <input type="text" name="ANIME_FILTER" class="form-control" value="{{ settings.ANIME_FILTER or 'type' }}" placeholder="type or tag:Name" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                    <div class="helper-text"><code>type</code> = Sonarr series type "anime", <code>all</code> = every series, <code>tag:Name</code> = tagged series</div>
                 </div>
             </div>
 
@@ -186,7 +218,8 @@
                 <div class="toggle-section-label">Automation</div>
                 <label class="toggle-row"><input type="checkbox" name="SHOW_THUMBNAILS" value="true" {% if settings.SHOW_THUMBNAILS != 'false' %}checked{% endif %}>Show poster thumbnails</label>
                 <label class="toggle-row"><input type="checkbox" name="AUTO_TAG_SONARR" value="true" {% if settings.AUTO_TAG_SONARR != 'false' %}checked{% endif %}>Auto-tag Sonarr series (babel:dubbed/sub-only)</label>
-                <label class="toggle-row"><input type="checkbox" name="AUTO_COLLECTIONS_PLEX" value="true" {% if settings.AUTO_COLLECTIONS_PLEX != 'false' %}checked{% endif %}>Auto-manage Plex collections</label>
+                <label class="toggle-row"><input type="checkbox" name="AUTO_COLLECTIONS_PLEX" value="true" {% if settings.AUTO_COLLECTIONS_PLEX != 'false' %}checked{% endif %}>Auto-manage media server collections (Plex/Jellyfin)</label>
+                <label class="toggle-row"><input type="checkbox" name="AUTO_MONITOR_DUBS" value="true" {% if settings.AUTO_MONITOR_DUBS == 'true' %}checked{% endif %}>Monitor episodes in Sonarr when a dub is available</label>
                 <label class="toggle-row"><input type="checkbox" name="AUTO_RESOLVE_IMPORTS" value="true" {% if settings.AUTO_RESOLVE_IMPORTS != 'false' %}checked{% endif %}>Auto-resolve stuck Sonarr imports</label>
                 <label class="toggle-row"><input type="checkbox" name="STUCK_IMPORT_DRY_RUN" value="true" {% if settings.STUCK_IMPORT_DRY_RUN == 'true' %}checked{% endif %}>Dry-run stuck import resolution (log only, no queue changes)</label>
             </div>
@@ -198,10 +231,11 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 Path Mapping (Advanced)
             </summary>
-            <div class="card-desc" style="margin-top:0.5rem;">Only needed if Sonarr and Plex see files at different mount paths.</div>
+            <div class="card-desc" style="margin-top:0.5rem;">Only needed if Sonarr and your media server see files at different mount paths.</div>
             <div class="form-group"><label style="font-size:0.78rem;color:var(--text-muted);">Sonarr Prefix</label><input type="text" name="SONARR_PATH_PREFIX" class="form-control" value="{{ settings.SONARR_PATH_PREFIX or '' }}" placeholder="/tv" style="font-size:0.82rem;padding:0.35rem 0.6rem;"></div>
             <div class="form-group"><label style="font-size:0.78rem;color:var(--text-muted);">Local Prefix</label><input type="text" name="LOCAL_PATH_PREFIX" class="form-control" value="{{ settings.LOCAL_PATH_PREFIX or '' }}" placeholder="/media/tv" style="font-size:0.82rem;padding:0.35rem 0.6rem;"></div>
             <div class="form-group"><label style="font-size:0.78rem;color:var(--text-muted);">Plex Prefix</label><input type="text" name="PLEX_PATH_PREFIX" class="form-control" value="{{ settings.PLEX_PATH_PREFIX or '' }}" placeholder="/data/tv" style="font-size:0.82rem;padding:0.35rem 0.6rem;"></div>
+            <div class="form-group"><label style="font-size:0.78rem;color:var(--text-muted);">Jellyfin Prefix</label><input type="text" name="JELLYFIN_PATH_PREFIX" class="form-control" value="{{ settings.JELLYFIN_PATH_PREFIX or '' }}" placeholder="Defaults to the Plex prefix" style="font-size:0.82rem;padding:0.35rem 0.6rem;"></div>
         </details>
     </div>
 
@@ -223,6 +257,14 @@
                     <span style="font-size:0.75rem;color:var(--text-muted);">Create Sonarr custom format for dual audio</span>
                 </div>
                 <div id="action-result"></div>
+                <div style="display:flex;align-items:center;gap:0.6rem;border-top:1px solid var(--border-color);padding-top:0.6rem;">
+                    <button type="button" class="btn btn-sm btn-primary" style="font-size:0.78rem;padding:0.3rem 0.7rem;white-space:nowrap;"
+                            hx-post="/api/diagnostics/html" hx-target="#diagnostics-result" hx-swap="innerHTML">
+                        Run Diagnostics <span class="htmx-indicator"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;"></span></span>
+                    </button>
+                    <span style="font-size:0.75rem;color:var(--text-muted);">Explain why a scan is finding nothing</span>
+                </div>
+                <div id="diagnostics-result"></div>
             </div>
         </div>
 
@@ -232,12 +274,12 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
                 Library Filtering
             </div>
-            <div class="card-desc">Choose which Plex libraries and Sonarr paths to scan.</div>
+            <div class="card-desc">Choose which media server libraries and Sonarr paths to scan.</div>
 
             <!-- Plex -->
             <div style="margin-bottom:0.75rem;">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.35rem;">
-                    <span style="font-size:0.78rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.3px;">Plex Libraries</span>
+                    <span style="font-size:0.78rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.3px;">Media Server Libraries</span>
                     <button type="button" class="btn btn-sm btn-primary" id="discover-plex-btn" onclick="discoverPlex()" style="font-size:0.7rem;padding:0.2rem 0.5rem;">Discover</button>
                 </div>
                 <div id="plex-libraries"><p class="text-muted" style="font-size:0.78rem;">Click Discover to load.</p></div>

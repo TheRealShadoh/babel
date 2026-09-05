@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.config import get_settings, get_effective_settings, normalize_language, translate_path, cfg_bool
 from src.scanner.sonarr import SonarrClient
-from src.scanner.plex import PlexClient
+from src.scanner.media_server import create_media_client, server_label
 from src.scanner import ffprobe
 from src.db.database import get_db
 from src.db import models
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # `is_scan_running()`/progress polling would only see its own worker's state.
 _scan_lock = asyncio.Lock()
 _scan_cancel = asyncio.Event()
+# Whichever media-server client (Plex or Jellyfin) the running scan is using.
 _plex_client_ref = None
 
 # Set synchronously the moment a scan is requested, before the task that will
@@ -50,7 +51,7 @@ def get_scan_progress() -> dict:
 def request_scan_cancel():
     """Signal the running scan to stop after the current series."""
     _scan_cancel.set()
-    # Also cancel the Plex client's blocking thread operations
+    # Also cancel the media client's in-flight library walk
     if _plex_client_ref is not None:
         _plex_client_ref._cancel.set()
 
@@ -113,6 +114,7 @@ class ScanStats:
     plex_fresh_lookups: int = 0
     upgrades_succeeded: int = 0
     upgrades_failed: int = 0
+    monitored: int = 0
     status_changed: bool = False
     successful_upgrades: list = field(default_factory=list)
 
@@ -419,18 +421,22 @@ async def _execute_scan() -> dict:
                 sonarr = None
 
         global _plex_client_ref
-        plex = None
-        if cfg.get("PLEX_URL") and cfg.get("PLEX_TOKEN"):
-            plex = PlexClient(cfg["PLEX_URL"], cfg["PLEX_TOKEN"])
-            _plex_client_ref = plex
-            plex_ok, plex_msg = await plex.test_connection()
-            if not plex_ok:
-                logger.warning("Plex unreachable: %s", plex_msg)
-                plex = None
+        media, media_kind = create_media_client(cfg)
+        if media is not None:
+            _plex_client_ref = media
+            media_ok, media_msg = await media.test_connection()
+            if not media_ok:
+                logger.warning("%s unreachable: %s", server_label(media_kind), media_msg)
+                await media.close()
+                media = None
                 _plex_client_ref = None
+        plex = media
 
         if not sonarr and not plex:
-            msg = "Neither Sonarr nor Plex is reachable. Configure at least one in Settings."
+            msg = (
+                "Neither Sonarr nor a media server (Plex/Jellyfin) is reachable. "
+                "Configure at least one in Settings."
+            )
             logger.error(msg)
             await models.complete_scan_log(db, scan_id, 0, 0, 1, "failed", msg)
             return {"status": "failed", "error": msg}
@@ -444,8 +450,8 @@ async def _execute_scan() -> dict:
                     db, cfg, sonarr, plex, rate_limiter, cooldown, target_lang, scan_id,
                 )
             else:
-                return await _scan_plex_only(
-                    db, cfg, plex, target_lang, scan_id,
+                return await _scan_media_server_only(
+                    db, cfg, plex, target_lang, scan_id, media_kind,
                 )
         finally:
             if sonarr:
@@ -479,30 +485,32 @@ def _is_ignored(path: str, patterns: list[str]) -> bool:
 
 
 async def _ensure_plex_index(plex, ignore_patterns: list[str]) -> None:
-    """Build the Plex path index the first time it's actually needed.
+    """Build the media server's path index the first time it's actually needed.
 
     Building it eagerly before every scan meant crawling (and reload()-ing)
-    every episode in the whole Plex library even on cycles where nothing
+    every episode in the whole media library even on cycles where nothing
     changed and the DB cache satisfied every episode — a common steady
     state. Deferring to first use means a scan that touches nothing new
     skips the crawl entirely.
     """
     if plex is None or plex.is_indexed():
         return
-    logger.info("Building Plex audio track index (this may take a minute)...")
-    _scan_progress.update(phase="indexing_plex", last_log="Building Plex audio track index...")
+    label = server_label(getattr(plex, "path_target", "plex"))
+    logger.info("Building %s audio track index (this may take a minute)...", label)
+    _scan_progress.update(phase="indexing_plex", last_log=f"Building {label} audio track index...")
     plex_count = await plex.build_index(ignored_patterns=ignore_patterns)
-    logger.info("Plex index ready: %d episode files indexed", plex_count)
-    _scan_progress.update(phase="scanning", last_log=f"Plex index ready: {plex_count} files")
+    logger.info("%s index ready: %d episode files indexed", label, plex_count)
+    _scan_progress.update(phase="scanning", last_log=f"{label} index ready: {plex_count} files")
     samples = plex.get_sample_paths(3)
     if samples:
-        logger.info("Sample Plex paths: %s", samples)
+        logger.info("Sample %s paths: %s", label, samples)
 
 
-async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
-    """Scan using Plex as the sole data source (no Sonarr)."""
+async def _scan_media_server_only(db, cfg, plex, target_lang, scan_id, media_kind="plex") -> dict:
+    """Scan using the media server as the sole data source (no Sonarr)."""
+    label = server_label(media_kind)
     logger.info("=" * 60)
-    logger.info("SCAN STARTED — Plex-only mode (Sonarr unavailable)")
+    logger.info("SCAN STARTED — %s-only mode (Sonarr unavailable)", label)
     logger.info("Target language: %s", target_lang)
     logger.info("=" * 60)
 
@@ -510,17 +518,17 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
     if ignore_patterns:
         logger.info("Ignore patterns: %s", ignore_patterns)
 
-    logger.info("Scanning Plex library for all shows and audio tracks...")
+    logger.info("Scanning %s library for all shows and audio tracks...", label)
 
     _scan_progress.update(
         phase="indexing_plex", series_index=0, series_total=0,
-        last_log="Reading the Plex library...",
+        last_log=f"Reading the {label} library...",
     )
     plex_series = await plex.get_library_data(target_lang)
     if not plex_series:
-        # Either Plex genuinely has no shows or the read failed; both look the
-        # same from here, and neither justifies deleting the whole library.
-        msg = "Plex returned no shows — aborting scan without touching stored data."
+        # Either the server genuinely has no shows or the read failed; both
+        # look the same from here, and neither justifies deleting the library.
+        msg = f"{label} returned no shows — aborting scan without touching stored data."
         logger.error(msg)
         await models.complete_scan_log(db, scan_id, 0, 0, 1, "failed", msg)
         return {"status": "failed", "error": msg}
@@ -534,7 +542,7 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
             logger.info("Skipped %d shows matching ignore patterns", skipped)
 
     total_series = len(plex_series)
-    logger.info("Found %d shows with episodes in Plex", total_series)
+    logger.info("Found %d shows with episodes in %s", total_series, label)
 
     episodes_checked = 0
     dubbed_found = 0
@@ -557,7 +565,8 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
             series_total=total_series,
         )
 
-        # Use plex_key as a stable numeric ID (offset to avoid collision with Sonarr IDs)
+        # Use the media server's own key as a stable numeric ID (offset to
+        # avoid collision with Sonarr IDs)
         series_id = -(abs(series["plex_key"]) + 1000000)
         plex_series_ids.add(series_id)
         await models.upsert_series(
@@ -633,7 +642,7 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
     _scan_progress.update(phase="idle", current_series="", last_log="")
 
     logger.info("=" * 60)
-    logger.info("SCAN %s (Plex-only)", "CANCELLED" if cancelled else "COMPLETE")
+    logger.info("SCAN %s (%s-only)", "CANCELLED" if cancelled else "COMPLETE", label)
     logger.info("  Shows found:      %d", total_series)
     logger.info("  Episodes checked: %d", episodes_checked)
     logger.info("  Dubbed:           %d", dubbed_found)
@@ -651,11 +660,11 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
             )
             if not coll_result.get("skipped"):
                 logger.info(
-                    "Plex collections synced: %d shows updated",
-                    coll_result["collections_updated"],
+                    "%s collections synced: %d shows updated",
+                    label, coll_result["collections_updated"],
                 )
         except Exception:
-            logger.warning("Plex collection sync failed", exc_info=True)
+            logger.warning("%s collection sync failed", label, exc_info=True)
 
     # Discord notifications
     webhook_url = cfg.get("DISCORD_WEBHOOK_URL", "")
@@ -671,7 +680,7 @@ async def _scan_plex_only(db, cfg, plex, target_lang, scan_id) -> dict:
 
     return {
         "status": "completed",
-        "mode": "plex_only",
+        "mode": f"{media_kind}_only",
         "episodes_checked": episodes_checked,
         "searches_triggered": 0,
         "dubbed": dubbed_found,
@@ -699,13 +708,14 @@ async def _classify_episode_audio(
         # File changed — the previous audio_tracks row no longer applies.
         if plex:
             await _ensure_plex_index(plex, ignore_patterns)
-            plex_path = translate_path(file_path, "plex", cfg)
+            plex_path = translate_path(file_path, getattr(plex, "path_target", "plex"), cfg)
             tracks = await plex.get_audio_tracks(plex_path)
             if tracks is not None:
                 stats.plex_fresh_lookups += 1
+                source = getattr(plex, "path_target", "plex")
                 for t in tracks:
                     t["language"] = normalize_language(t["language"])
-                    t["source"] = "plex"
+                    t["source"] = source
         if tracks is None:
             local_path = translate_path(file_path, "local", cfg)
             tracks = await ffprobe.get_audio_tracks(local_path)
@@ -726,13 +736,14 @@ async def _classify_episode_audio(
 
         if tracks is None and plex:
             await _ensure_plex_index(plex, ignore_patterns)
-            plex_path = translate_path(file_path, "plex", cfg)
+            plex_path = translate_path(file_path, getattr(plex, "path_target", "plex"), cfg)
             tracks = await plex.get_audio_tracks(plex_path)
             if tracks is not None:
                 stats.plex_fresh_lookups += 1
+                source = getattr(plex, "path_target", "plex")
                 for t in tracks:
                     t["language"] = normalize_language(t["language"])
-                    t["source"] = "plex"
+                    t["source"] = source
 
         if tracks is None:
             local_path = translate_path(file_path, "local", cfg)
@@ -748,7 +759,7 @@ async def _classify_episode_audio(
         languages = {t["language"] for t in tracks}
         status = "DUBBED" if target_lang in languages else "SUB_ONLY"
     else:
-        # Audio could not be read — the file is not in Plex and ffprobe could
+        # Audio could not be read — the media server does not have it and ffprobe could
         # not reach it. That is a normal outcome for an unmounted library, not
         # a scan error, and counting it as one made every scan look broken.
         status = "UNKNOWN"
@@ -910,7 +921,7 @@ async def _filter_max_attempts(db, cfg, sub_only_to_search: list[int]) -> list[i
 
 
 async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, target_lang, scan_id) -> dict:
-    """Full scan using Sonarr as primary data source + Plex/ffprobe for audio."""
+    """Full scan using Sonarr as primary data source + media server/ffprobe for audio."""
     stats = ScanStats()
 
     anime_series = await sonarr.get_anime_series(cfg.get("ANIME_FILTER", "type"))
@@ -936,6 +947,19 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
             logger.info("Skipped %d series matching ignore patterns", skipped)
 
     total_series = len(anime_series)
+    scan_warning: str | None = None
+    if total_series == 0:
+        # Sonarr answered, so this is not a connection failure — the filter
+        # simply matched nothing. Recorded on the scan so History and the UI
+        # say so instead of showing an empty, unexplained pass.
+        scan_warning = (
+            f"No Sonarr series matched the Anime Filter "
+            f"{cfg.get('ANIME_FILTER', 'type')!r}. Run Diagnostics on the Settings "
+            "page to see what Sonarr actually has, then set the filter to 'all' "
+            "or 'tag:YourTag'."
+        )
+        logger.warning(scan_warning)
+
     logger.info("=" * 60)
     logger.info("SCAN STARTED — %d anime series to process", total_series)
     logger.info("Target language: %s | Cooldown: %d days | Rate limit: %s/min",
@@ -944,7 +968,11 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
     logger.info("=" * 60)
 
     if not plex:
-        logger.info("Plex not configured — will use ffprobe only")
+        logger.info("No media server available — will use ffprobe only")
+
+    auto_monitor = cfg_bool(cfg.get("AUTO_MONITOR_DUBS"), default=False)
+    if auto_monitor:
+        logger.info("Auto-monitor is on — episodes Babel searches will be monitored in Sonarr")
 
     sonarr_series_ids = set()
 
@@ -1023,6 +1051,11 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
         series_searched = 0
         all_to_search = sub_only_to_search + failed_retry_ids
         if all_to_search:
+            # Monitor before searching: an unmonitored episode gets only the
+            # one search Babel triggers, while a monitored one stays in
+            # Sonarr's own RSS/upgrade cycle until the dub actually shows up.
+            if auto_monitor and await sonarr.set_episodes_monitored(all_to_search, True):
+                stats.monitored += len(all_to_search)
             await rate_limiter.wait()
             success = await sonarr.search_episodes(all_to_search)
             if success:
@@ -1105,7 +1138,7 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
     status_label = "cancelled" if cancelled else "completed"
     await models.complete_scan_log(
         db, scan_id, stats.episodes_checked, stats.searches_triggered, stats.errors,
-        status_label, episodes_seen=stats.episodes_seen,
+        status_label, error_message=scan_warning, episodes_seen=stats.episodes_seen,
         undetermined=stats.undetermined,
     )
 
@@ -1123,6 +1156,8 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
     logger.info("  Searches triggered: %d", stats.searches_triggered)
     logger.info("  Plex cache hits:    %d", stats.plex_cache_hits)
     logger.info("  Fresh lookups:      %d", stats.plex_fresh_lookups)
+    if stats.monitored:
+        logger.info("  Monitored in Sonarr: %d", stats.monitored)
     if stats.upgrades_succeeded or stats.upgrades_failed:
         logger.info("  Upgrades succeeded: %d", stats.upgrades_succeeded)
         logger.info("  Upgrades failed:    %d (re-queued)", stats.upgrades_failed)
@@ -1179,7 +1214,7 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
         except Exception:
             logger.warning("Sonarr tag sync failed", exc_info=True)
 
-    # Plex collection management
+    # Media server collection management
     if plex and cfg_bool(cfg.get("AUTO_COLLECTIONS_PLEX")):
         try:
             all_series_data = await models.get_all_series(db)
@@ -1188,11 +1223,12 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
             )
             if not coll_result.get("skipped"):
                 logger.info(
-                    "Plex collections synced: %d shows updated",
+                    "%s collections synced: %d shows updated",
+                    server_label(getattr(plex, "path_target", "plex")),
                     coll_result["collections_updated"],
                 )
         except Exception:
-            logger.warning("Plex collection sync failed", exc_info=True)
+            logger.warning("Media server collection sync failed", exc_info=True)
 
     # DB cleanup — prune old records
     try:
@@ -1220,6 +1256,7 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
 
     return {
         "status": "completed",
+        "warning": scan_warning,
         "episodes_checked": stats.episodes_checked,
         "skipped_unchanged": stats.skipped_unchanged,
         "searches_triggered": stats.searches_triggered,
@@ -1227,5 +1264,6 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
         "sub_only": stats.sub_only_found,
         "upgrades_succeeded": stats.upgrades_succeeded,
         "upgrades_failed": stats.upgrades_failed,
+        "monitored": stats.monitored,
         "errors": stats.errors,
     }

@@ -16,6 +16,7 @@ class FakeSonarr:
         self._fail_episodes_for = set(fail_episodes_for)
         self._fail_files_for = set(fail_files_for)
         self.searched_ids: list[list[int]] = []
+        self.monitored_calls: list[tuple[list[int], bool]] = []
         self.sync_dub_tags_calls = []
         self.removed_from_queue: list[tuple[int, bool]] = []
         self.force_manual_imports: list[tuple[int, int, list[int]]] = []
@@ -38,6 +39,10 @@ class FakeSonarr:
 
     async def search_episodes(self, episode_ids):
         self.searched_ids.append(list(episode_ids))
+        return True
+
+    async def set_episodes_monitored(self, episode_ids, monitored=True):
+        self.monitored_calls.append((list(episode_ids), monitored))
         return True
 
     async def sync_dub_tags(self, statuses):
@@ -141,6 +146,8 @@ def base_cfg(**overrides):
         "AUTO_TAG_SONARR": "false",
         "AUTO_COLLECTIONS_PLEX": "false",
         "AUTO_RESOLVE_IMPORTS": "false",
+        "AUTO_MONITOR_DUBS": "false",
+        "MEDIA_SERVER": "auto",
         "DISCORD_WEBHOOK_URL": "",
         "DB_PATH": "/tmp/babel_test_env.db",
     }

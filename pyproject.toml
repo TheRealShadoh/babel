@@ -1,7 +1,7 @@
 [project]
 name = "babel"
-version = "1.1.0"
-description = "Media Dub Detection & Upgrade Tool for Sonarr and Plex"
+version = "1.2.0"
+description = "Media Dub Detection & Upgrade Tool for Sonarr, Plex and Jellyfin"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 

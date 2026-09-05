@@ -190,6 +190,57 @@ async def bulk_lookup(
     return results
 
 
+async def monitor_newly_dubbed(db, cfg: dict, newly_available: list[dict]) -> int:
+    """Monitor the sub-only episodes of series that just got a dub.
+
+    A show Babel had written off as sub-only is often left unmonitored in
+    Sonarr, so when a dub is finally announced nothing goes looking for it.
+    Flipping those episodes back to monitored is what makes the announcement
+    actionable — Sonarr picks the dub up on its own once a release appears.
+
+    Returns the number of episodes monitored.
+    """
+    from src.config import cfg_bool
+    from src.db import models
+
+    if not cfg_bool(cfg.get("AUTO_MONITOR_DUBS"), default=False):
+        return 0
+    if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
+        return 0
+
+    # Negative IDs are media-server-only series that Sonarr knows nothing about.
+    series_ids = [s["id"] for s in newly_available if s.get("id", 0) > 0]
+    if not series_ids:
+        return 0
+
+    episode_ids: list[int] = []
+    for series_id in series_ids:
+        episode_ids.extend(
+            await models.get_episode_ids_by_status(db, series_id, ("SUB_ONLY",))
+        )
+    if not episode_ids:
+        return 0
+
+    from src.scanner.sonarr import SonarrClient
+
+    sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
+    try:
+        ok = await sonarr.set_episodes_monitored(episode_ids, True)
+    except Exception:
+        logger.warning("Failed to monitor newly dubbed episodes", exc_info=True)
+        return 0
+    finally:
+        await sonarr.close()
+
+    if not ok:
+        return 0
+    logger.info(
+        "Monitored %d sub-only episodes across %d newly dubbed series",
+        len(episode_ids), len(series_ids),
+    )
+    return len(episode_ids)
+
+
 async def run_dub_lookup(force: bool = False) -> dict:
     """Run dub availability lookup for series that need it.
 
@@ -204,7 +255,7 @@ async def run_dub_lookup(force: bool = False) -> dict:
     cfg = await get_effective_settings()
     db = await get_db(settings.DB_PATH)
     summary = {"checked": 0, "available": 0, "likely": 0, "unlikely": 0,
-               "unreachable": 0}
+               "unreachable": 0, "monitored": 0}
 
     # Recorded in scan_log for history, but tagged so the Overview does not
     # mistake a dub lookup for the most recent media scan.
@@ -244,6 +295,7 @@ async def run_dub_lookup(force: bool = False) -> dict:
                 # Detect transition to available/likely
                 if new_status in ("available", "likely") and old_status in (None, "unknown", "unlikely"):
                     newly_available.append({
+                        "id": series["id"],
                         "title": series["title"],
                         "licensors": ", ".join(info["licensors"]),
                         "poster_url": series.get("poster_url"),
@@ -255,6 +307,8 @@ async def run_dub_lookup(force: bool = False) -> dict:
                 )
 
         if newly_available:
+            summary["monitored"] = await monitor_newly_dubbed(db, cfg, newly_available)
+
             webhook_url = cfg.get("DISCORD_WEBHOOK_URL", "")
             if webhook_url:
                 from src.notifications import send_discord_embed
@@ -278,6 +332,8 @@ async def run_dub_lookup(force: bool = False) -> dict:
             f"Dub lookup: {summary['checked']} checked, {summary['available']} available, "
             f"{summary['likely']} likely, {summary['unlikely']} unlikely"
         )
+        if summary["monitored"]:
+            msg += f", {summary['monitored']} episodes monitored in Sonarr"
         if summary["unreachable"]:
             msg += f", {summary['unreachable']} unreachable"
             logger.warning(

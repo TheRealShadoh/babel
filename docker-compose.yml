@@ -17,8 +17,17 @@ services:
       - SONARR_API_KEY=
       - PLEX_URL=http://your-server:32400
       - PLEX_TOKEN=
+      # Jellyfin instead of Plex (Dashboard > API Keys). With both configured,
+      # MEDIA_SERVER decides which one a scan uses; "auto" prefers Plex.
+      # - JELLYFIN_URL=http://your-server:8096
+      # - JELLYFIN_API_KEY=
+      # - MEDIA_SERVER=auto
       - SCAN_INTERVAL_HOURS=6
       - TARGET_LANGUAGE=eng
+      # Which Sonarr series to scan: type (series type "anime"), all, or tag:Name
+      # - ANIME_FILTER=type
+      # Set episodes to monitored in Sonarr once a dub is available
+      # - AUTO_MONITOR_DUBS=false
       # Hung-mount hardening. Every probe is bounded, and at most
       # FFPROBE_MAX_CONCURRENT ffprobe processes can be stuck on a dead mount
       # at once. Raise the timeouts for very slow storage.
