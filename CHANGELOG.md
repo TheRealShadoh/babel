@@ -1,7 +1,10 @@
 # Changelog
 
-All notable changes to Babel. Versions are git tags (`vX.Y.Z`); the Docker
-image is tagged to match, plus `latest` for the current master.
+All notable changes to Babel. Babel is published continuously: every merge to
+`master` rebuilds the `therealshadoh/babel:latest` image (plus a `master` tag
+and a commit-sha tag). The version numbers below are the value reported by
+`/api/health` for the state of `master` when each set of changes landed; they
+are not separate releases, and there are no version-tagged images to pin.
 
 ## 1.2.1
 
