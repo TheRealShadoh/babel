@@ -528,6 +528,15 @@ async def get_episodes_for_series(
         return _rows_to_dicts(await cur.fetchall())
 
 
+async def count_series_with_files(db: aiosqlite.Connection) -> int:
+    """How many series currently have at least one file-backed episode."""
+    async with db.execute(
+        "SELECT COUNT(*) AS c FROM series WHERE total_episodes - missing_count > 0"
+    ) as cur:
+        row = await cur.fetchone()
+    return (row["c"] if row else 0) or 0
+
+
 async def get_episode_ids_by_status(
     db: aiosqlite.Connection, series_id: int, statuses: tuple[str, ...]
 ) -> list[int]:

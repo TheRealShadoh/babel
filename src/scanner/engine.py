@@ -933,6 +933,64 @@ async def _filter_max_attempts(db, cfg, sub_only_to_search: list[int]) -> list[i
     return filtered
 
 
+# Mirrors the series-purge floor in models.delete_series_not_in: a pass in
+# which most of the file-backed library "loses" its files at once is Sonarr
+# answering before it is ready, not a real change, and is refused whole.
+_FILELESS_FLOOR_ROWS = 10
+_FILELESS_FLOOR_FRACTION = 0.5
+
+
+async def _apply_fileless_series(
+    db, fileless: list[tuple[dict, list[dict]]], file_backed_before: int, stats: ScanStats,
+) -> bool:
+    """Record that *fileless* series now have no files — unless too many did.
+
+    Returns False when the batch was refused, so the caller knows the pass
+    did not fully reconcile.
+    """
+    previously_backed = []
+    for series, _episodes in fileless:
+        existing = await models.get_series(db, series["id"])
+        if existing and (existing.get("total_episodes", 0) - existing.get("missing_count", 0)) > 0:
+            previously_backed.append(series["title"])
+
+    if (
+        len(previously_backed) > _FILELESS_FLOOR_ROWS
+        and len(previously_backed) > file_backed_before * _FILELESS_FLOOR_FRACTION
+    ):
+        logger.error(
+            "Refusing to mark %d of %d file-backed series as having no files in one "
+            "pass — Sonarr almost certainly answered before it finished starting. "
+            "Their cached statuses are untouched; the next scan will re-check. "
+            "First few: %s",
+            len(previously_backed), file_backed_before, ", ".join(previously_backed[:5]),
+        )
+        stats.errors += 1
+        return False
+
+    for series, episodes in fileless:
+        # Sonarr confirms the series has no files. Drop any episode rows left
+        # over from when it did, so a deleted show stops reporting the status
+        # its old rows still carry.
+        existing_series = await models.get_series(db, series["id"])
+        if existing_series and existing_series["dub_status"] == "EMPTY":
+            stats.skipped_unchanged += existing_series.get("total_episodes", 0)
+        keep_ids = {ep["id"] for ep in episodes}
+        await models.delete_episodes_not_in(
+            db, series["id"], keep_ids, commit=False, allow_empty=True
+        )
+        for ep in episodes:
+            await models.upsert_episode(
+                db, ep["id"], series["id"], ep["seasonNumber"], ep["episodeNumber"],
+                ep["title"], None, None, commit=False,
+            )
+            await models.update_episode_status(db, ep["id"], "MISSING", commit=False)
+        if await models.update_series_counts(db, series["id"], commit=False):
+            stats.status_changed = True
+    await db.commit()
+    return True
+
+
 async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, target_lang, scan_id) -> dict:
     """Full scan using Sonarr as primary data source + media server/ffprobe for audio."""
     stats = ScanStats()
@@ -989,6 +1047,11 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
 
     sonarr_series_ids = set()
 
+    # Series Sonarr reported as having no files this pass. Applied after the
+    # loop, once it is known how many there are — see _apply_fileless_series.
+    fileless: list[tuple[dict, list[dict]]] = []
+    file_backed_before = await models.count_series_with_files(db)
+
     for i, series in enumerate(anime_series, 1):
         if _scan_cancel.is_set():
             logger.info("Scan cancelled at series %d/%d", i, total_series)
@@ -1028,25 +1091,32 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
             continue
 
         if not episode_files:
-            # Sonarr confirms the series has no files. Drop any episode rows
-            # left over from when it did, so a deleted show stops reporting
-            # the status its old rows still carry.
-            existing_series = await models.get_series(db, series["id"])
-            if existing_series and existing_series["dub_status"] == "EMPTY":
-                stats.skipped_unchanged += existing_series.get("total_episodes", 0)
-            keep_ids = {ep["id"] for ep in episodes}
-            await models.delete_episodes_not_in(
-                db, series["id"], keep_ids, commit=False, allow_empty=True
-            )
-            for ep in episodes:
-                await models.upsert_episode(
-                    db, ep["id"], series["id"], ep["seasonNumber"], ep["episodeNumber"],
-                    ep["title"], None, None, commit=False,
+            # Sonarr reports no files. That is also exactly what it says for a
+            # few seconds after a restart, before its database is loaded, and
+            # acting on it then wipes every cached classification the series
+            # has. Cross-check against Sonarr's own episode list first, and
+            # defer the rest until the whole pass shows how many series this
+            # happened to — one show losing its files is a deletion, most of
+            # the library "losing" them at once is Sonarr not being ready.
+            if any(ep.get("hasFile") for ep in episodes):
+                logger.warning(
+                    "Skipping %s — Sonarr listed no files but marks %d of its episodes "
+                    "as downloaded; treating the answer as transient",
+                    series["title"], sum(1 for ep in episodes if ep.get("hasFile")),
                 )
-                await models.update_episode_status(db, ep["id"], "MISSING", commit=False)
-            if await models.update_series_counts(db, series["id"], commit=False):
-                stats.status_changed = True
-            await db.commit()
+                reconcile_ok = False
+                stats.errors += 1
+                continue
+            if not episodes and await models.get_episodes_for_series(db, series["id"]):
+                logger.warning(
+                    "Skipping %s — Sonarr returned no episodes at all for a series "
+                    "Babel has rows for; treating the answer as transient",
+                    series["title"],
+                )
+                reconcile_ok = False
+                stats.errors += 1
+                continue
+            fileless.append((series, episodes))
             continue
 
         stats.episodes_seen += len(episodes)
@@ -1138,6 +1208,10 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
         )
 
     cancelled = _scan_cancel.is_set()
+    if fileless and not cancelled:
+        if not await _apply_fileless_series(db, fileless, file_backed_before, stats):
+            reconcile_ok = False
+
     if cancelled:
         logger.info("Skipping orphan cleanup — scan was cancelled before it finished")
     elif not reconcile_ok:
