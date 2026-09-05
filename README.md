@@ -39,7 +39,7 @@
 - Stuck import resolution — detects and force-imports stuck Sonarr queue items (including ID mismatches)
 
 **Intelligence**
-- Dub availability lookup via MyAnimeList/Jikan — knows if a dub even exists before searching
+- Dub availability lookup via MyAnimeList/Jikan and Anime News Network — knows if a dub even exists before searching
 - Dub status change notifications — alerts when a previously unlicensed show gets a dub
 - Auto-overrides MAL when actual dubbed audio is detected in files
 
@@ -107,6 +107,7 @@ All settings can be configured via environment variables or the web UI Settings 
 | `SEARCH_RATE_LIMIT` | `5` | Max Sonarr searches per minute |
 | `ANIME_FILTER` | `type` | Which Sonarr series to scan: `type` (series type "anime"), `all`, or `tag:YourTag` |
 | `AUTO_MONITOR_DUBS` | `true` | Monitor episodes in Sonarr when a dub is available, so Sonarr keeps looking on its own |
+| `DUB_LOOKUP_ANN` | `true` | Check Anime News Network when MyAnimeList cannot settle whether a dub exists |
 | `DISCORD_WEBHOOK_URL` | | Discord webhook for notifications |
 | `WEBHOOK_SECRET` | | If set, the Sonarr webhook requires `?apikey=` (or `X-Api-Key` header) to match |
 | `AUTH_USERNAME` / `AUTH_PASSWORD` | | If both are set, the whole dashboard requires HTTP Basic Auth. Overrides anything set in Settings → Access |
@@ -153,6 +154,45 @@ available**, `AUTO_MONITOR_DUBS`, on by default):
 Babel only ever *adds* monitoring, only to sub-only episodes of series it
 tracks, and never unmonitors anything. Turn it off if you keep episodes
 deliberately unmonitored and don't want Babel touching that.
+
+### How dub availability is decided
+
+Two sources, asked in order of cost:
+
+1. **MyAnimeList** (via the Jikan API) records a show's *licensors*. That is an
+   inference — a licensor may only ever distribute a show subtitled — but it is
+   one request and covers most of the catalogue. A recognised dub licensor
+   (Funimation, Crunchyroll, Sentai, HIDIVE, Netflix, Amazon, Muse, …) reads as
+   **available**; some other licensor reads as **likely**; nothing recorded on a
+   finished show reads as **unlikely**. A show still airing usually has no
+   licensor recorded yet, so it stays **unknown** and is re-checked, rather than
+   being written off as having no dub.
+2. **Anime News Network** lists the actual voice cast per language, so an
+   English cast is direct evidence a dub was produced. Babel asks ANN only about
+   the titles MyAnimeList could not settle (`DUB_LOOKUP_ANN`, on by default),
+   because each one costs two more requests at ANN's ~1/second guidance. ANN
+   only answers on an exact title match — crediting one show's dub to its
+   sequel would be worse than no answer — and if ANN is unreachable or has no
+   entry, MyAnimeList's verdict stands.
+
+Neither source can be reached from a container with no outbound HTTPS, and the
+symptom is silence: the Dub Intelligence page just stays empty. To check from
+the machine actually running Babel:
+
+```bash
+docker exec babel python scripts/check_dub_lookup.py
+```
+
+With no arguments it checks a few shows whose dubs are beyond dispute, prints
+what each source said, and exits non-zero if the services are unreachable (or
+if a known-dubbed show does not come back "available"). Pass titles of your own,
+or `--from-library 10` to check shows from your library. **Run Diagnostics** on
+the Settings page does the same thing as a single canary lookup.
+
+Dub availability is advisory: it drives the Dub Intelligence page, the badges on
+each series, and (with `AUTO_MONITOR_DUBS` on) monitoring when a dub is newly
+announced. It never blocks a search — a sub-only episode is searched for on the
+normal cooldown whatever MyAnimeList thinks.
 
 ### Nothing showing up?
 
@@ -289,7 +329,7 @@ a read-only mode (detection and collections, no searches).
 | `POST /api/webhook/sonarr` | Sonarr webhook receiver (`?apikey=` if `WEBHOOK_SECRET` is set) |
 | `POST /api/check-downloads` | Check pending upgrade status |
 | `POST /api/resolve-imports` | Fix stuck Sonarr imports |
-| `POST /api/lookup-dubs` | Run MAL dub availability check |
+| `POST /api/lookup-dubs` | Run the dub availability check (MyAnimeList, then ANN where needed) |
 | `POST /api/setup-sonarr-dub` | Create/assign a Sonarr custom format that prefers dual-audio releases |
 | `GET /api/diagnostics` | Why a scan is finding nothing: connections, filter match, paths, ignores |
 

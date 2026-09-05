@@ -13,6 +13,30 @@ from src.scanner.sonarr import SonarrClient
 from tests.fakes import FakeSonarr, FakePlex, base_cfg
 
 
+def stub_dub_self_test(monkeypatch, **overrides):
+    """Keep diagnostics tests off the network: the dub check calls out live."""
+    report = {
+        "title": "Cowboy Bebop",
+        "mal": {"ok": True, "reachable": True, "rate_limited": False,
+                "matched": "Cowboy Bebop", "dub_status": "available",
+                "licensors": ["Funimation"]},
+        "ann": {"enabled": True, "ok": True, "has_dub": True,
+                "matched": "Cowboy Bebop", "cast_size": 30},
+        "verdict": "available",
+    }
+    for key, value in overrides.items():
+        if isinstance(value, dict):
+            report[key].update(value)
+        else:
+            report[key] = value
+
+    async def fake_self_test(title="Cowboy Bebop"):
+        return report
+
+    monkeypatch.setattr("src.scanner.dub_lookup.self_test", fake_self_test)
+    return report
+
+
 @pytest.fixture
 async def db(tmp_path):
     db_path = str(tmp_path / "babel_test.db")
@@ -132,6 +156,7 @@ async def test_run_diagnostics_reports_unconfigured_services(monkeypatch, tmp_pa
 
     monkeypatch.setattr(diagnostics, "get_effective_settings", fake_cfg)
     monkeypatch.setattr(diagnostics, "get_settings", lambda: _Settings())
+    stub_dub_self_test(monkeypatch)
 
     report = await diagnostics.run_diagnostics()
     names = {c["name"]: c for c in report["checks"]}
@@ -176,6 +201,7 @@ async def test_run_diagnostics_flags_a_filter_that_matches_nothing(monkeypatch, 
     monkeypatch.setattr(diagnostics, "get_effective_settings", fake_cfg)
     monkeypatch.setattr(diagnostics, "get_settings", lambda: _Settings())
     monkeypatch.setattr(diagnostics, "SonarrClient", fake_client)
+    stub_dub_self_test(monkeypatch)
 
     report = await diagnostics.run_diagnostics()
     checks = {c["name"]: c for c in report["checks"]}
@@ -222,6 +248,7 @@ async def test_diagnostics_reports_each_media_server_separately(monkeypatch, tmp
     monkeypatch.setattr(diagnostics, "get_effective_settings", fake_cfg)
     monkeypatch.setattr(diagnostics, "get_settings", lambda: _Settings())
     monkeypatch.setattr(diagnostics, "build_client", lambda kind, cfg: FakeServer(kind))
+    stub_dub_self_test(monkeypatch)
 
     report = await diagnostics.run_diagnostics()
     checks = {c["name"]: c for c in report["checks"]}

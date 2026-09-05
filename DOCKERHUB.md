@@ -7,7 +7,7 @@ Babel monitors your media library via **Sonarr** and **Plex** or **Jellyfin**, d
 - **Audio Track Detection** — Scans Plex or Jellyfin for audio streams, identifies Japanese-only (sub) vs English (dubbed) episodes
 - **Automatic Dub Searching** — Triggers Sonarr searches for dubbed releases when sub-only episodes are found
 - **Upgrade Tracking** — Monitors if Sonarr downloads are actually dubbed, auto-retries failed upgrades
-- **Dub Intelligence** — Queries MyAnimeList to check if English dubs even exist before searching
+- **Dub Intelligence** — Queries MyAnimeList and Anime News Network to check if English dubs even exist before searching
 - **Sonarr Auto-Tagging** — Tags series as `babel:dubbed`, `babel:partial-dub`, `babel:sub-only`
 - **Collections** — Auto-creates "Dubbed Anime", "Sub-Only Anime" collections in Plex and/or Jellyfin
 - **Stuck Import Resolution** — Detects and force-imports stuck Sonarr downloads
@@ -56,6 +56,7 @@ All settings can be configured via environment variables or the web UI (Settings
 | `SEARCH_COOLDOWN_DAYS` | `7` | Days between re-searching the same episode |
 | `ANIME_FILTER` | `type` | Which Sonarr series to scan: `type`, `all`, or `tag:YourTag` |
 | `AUTO_MONITOR_DUBS` | `true` | Monitor episodes in Sonarr once a dub is available |
+| `DUB_LOOKUP_ANN` | `true` | Check Anime News Network when MyAnimeList is inconclusive |
 | `DISCORD_WEBHOOK_URL` | — | Discord webhook for notifications |
 
 ## Unraid

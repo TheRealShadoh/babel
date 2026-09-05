@@ -266,6 +266,76 @@ async def _diagnose_ignores(checks: list[dict]) -> None:
         ))
 
 
+# One canary lookup per diagnostics run, bounded so a slow or blocked network
+# cannot hold the request open.
+_DUB_LOOKUP_TIMEOUT = 25.0
+
+
+async def _diagnose_dub_lookup(checks: list[dict]) -> None:
+    """Prove the dub-availability sources are actually reachable from here."""
+    from src.scanner.dub_lookup import self_test
+
+    try:
+        report = await asyncio.wait_for(self_test(), _DUB_LOOKUP_TIMEOUT)
+    except asyncio.TimeoutError:
+        checks.append(_check(
+            "Dub lookup", WARN, "The lookup did not finish within 25s",
+            "MyAnimeList (api.jikan.moe) is slow or unreachable from the container. "
+            "Dub intelligence will retry on its next run; scanning is unaffected.",
+        ))
+        return
+    except Exception as e:
+        logger.exception("Dub lookup self-test failed")
+        checks.append(_check("Dub lookup", ERROR, f"Self-test failed: {e}"))
+        return
+
+    mal = report["mal"]
+    if mal["ok"]:
+        detail = f"MyAnimeList answered for '{report['title']}' — matched {mal['matched']!r}"
+        if mal["licensors"]:
+            detail += f", licensors: {', '.join(mal['licensors'][:3])}"
+        checks.append(_check("Dub lookup (MyAnimeList)", OK, detail))
+    elif mal["rate_limited"]:
+        checks.append(_check(
+            "Dub lookup (MyAnimeList)", WARN, "Rate limited by api.jikan.moe",
+            "Normal under load — lookups back off and retry. Persistent throttling "
+            "means the daily run will take longer, not that it is broken.",
+        ))
+    else:
+        checks.append(_check(
+            "Dub lookup (MyAnimeList)", ERROR, "Could not reach api.jikan.moe",
+            "Check outbound HTTPS from the container (DNS, firewall, proxy). "
+            "Dub availability stays blank until this works; audio detection and "
+            "searches are unaffected.",
+        ))
+
+    ann = report["ann"]
+    if not ann["enabled"]:
+        checks.append(_check(
+            "Dub lookup (Anime News Network)", INFO, "Disabled in Settings",
+            "MyAnimeList alone cannot tell a sub-only licence from a dubbed one.",
+        ))
+    elif ann["ok"]:
+        detail = f"ANN answered — matched {ann['matched']!r}" if ann["matched"] else \
+            "ANN answered but has no entry under that title"
+        if ann["has_dub"]:
+            detail += f", English dub cast of {ann['cast_size']} roles"
+        checks.append(_check("Dub lookup (Anime News Network)", OK, detail))
+    else:
+        checks.append(_check(
+            "Dub lookup (Anime News Network)", WARN,
+            "Could not reach cdn.animenewsnetwork.com",
+            "Babel falls back to MyAnimeList alone, which is less certain for "
+            "currently-airing shows.",
+        ))
+
+    checks.append(_check(
+        "Dub lookup verdict", INFO,
+        f"'{report['title']}' resolved to '{report['verdict']}'",
+        "A known-dubbed show should resolve to 'available'.",
+    ))
+
+
 async def run_diagnostics() -> dict:
     """Run every check and return {"checks": [...], "summary": {...}}."""
     cfg = await get_effective_settings()
@@ -274,6 +344,7 @@ async def run_diagnostics() -> dict:
     sonarr_samples = await _diagnose_sonarr(cfg, checks)
     await _diagnose_media_server(cfg, checks)
     await _diagnose_paths(cfg, sonarr_samples, checks)
+    await _diagnose_dub_lookup(checks)
     await _diagnose_ignores(checks)
 
     summary = {

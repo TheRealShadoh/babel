@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # searching for a dub — the same episodes it asks Sonarr to search. Turn
     # it off if you keep episodes deliberately unmonitored.
     AUTO_MONITOR_DUBS: str = "true"
+    # Ask Anime News Network about the titles MyAnimeList cannot settle. Two
+    # extra requests per unsettled title, paced at ANN's ~1/second guidance.
+    DUB_LOOKUP_ANN: str = "true"
     STUCK_IMPORT_DRY_RUN: str = "false"
 
     # --- ffprobe / hung-mount hardening -------------------------------------

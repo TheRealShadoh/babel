@@ -90,6 +90,7 @@ SETTING_KEYS = (
     "AUTO_COLLECTIONS_PLEX",
     "AUTO_RESOLVE_IMPORTS",
     "AUTO_MONITOR_DUBS",
+    "DUB_LOOKUP_ANN",
     "STUCK_IMPORT_DRY_RUN",
     "WEBHOOK_SECRET",
     "AUTH_USERNAME",
@@ -733,7 +734,8 @@ async def save_settings(request: Request):
         for key in SETTING_KEYS:
             value = form.get(key)
             if key in ("SHOW_THUMBNAILS", "AUTO_TAG_SONARR", "AUTO_COLLECTIONS_PLEX",
-                       "AUTO_RESOLVE_IMPORTS", "AUTO_MONITOR_DUBS", "STUCK_IMPORT_DRY_RUN"):
+                       "AUTO_RESOLVE_IMPORTS", "AUTO_MONITOR_DUBS", "DUB_LOOKUP_ANN",
+                       "STUCK_IMPORT_DRY_RUN"):
                 # Checkbox: present = "true", absent = "false"
                 await models.set_setting(db, key, "true" if value else "false")
             elif key in SECRET_KEYS:

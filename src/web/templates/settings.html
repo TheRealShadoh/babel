@@ -220,6 +220,7 @@
                 <label class="toggle-row"><input type="checkbox" name="AUTO_TAG_SONARR" value="true" {% if settings.AUTO_TAG_SONARR != 'false' %}checked{% endif %}>Auto-tag Sonarr series (babel:dubbed/sub-only)</label>
                 <label class="toggle-row"><input type="checkbox" name="AUTO_COLLECTIONS_PLEX" value="true" {% if settings.AUTO_COLLECTIONS_PLEX != 'false' %}checked{% endif %}>Auto-manage media server collections (Plex/Jellyfin)</label>
                 <label class="toggle-row"><input type="checkbox" name="AUTO_MONITOR_DUBS" value="true" {% if settings.AUTO_MONITOR_DUBS != 'false' %}checked{% endif %}>Monitor episodes in Sonarr when a dub is available</label>
+                <label class="toggle-row"><input type="checkbox" name="DUB_LOOKUP_ANN" value="true" {% if settings.DUB_LOOKUP_ANN != 'false' %}checked{% endif %}>Check Anime News Network when MyAnimeList is inconclusive</label>
                 <label class="toggle-row"><input type="checkbox" name="AUTO_RESOLVE_IMPORTS" value="true" {% if settings.AUTO_RESOLVE_IMPORTS != 'false' %}checked{% endif %}>Auto-resolve stuck Sonarr imports</label>
                 <label class="toggle-row"><input type="checkbox" name="STUCK_IMPORT_DRY_RUN" value="true" {% if settings.STUCK_IMPORT_DRY_RUN == 'true' %}checked{% endif %}>Dry-run stuck import resolution (log only, no queue changes)</label>
             </div>
