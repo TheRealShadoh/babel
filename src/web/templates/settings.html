@@ -66,10 +66,10 @@
                 <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Sonarr</div>
                 <div class="form-row">
                     <div class="form-group" style="margin-bottom:0.35rem;">
-                        <input type="text" name="SONARR_URL" class="form-control" value="{{ settings.SONARR_URL or '' }}" placeholder="http://localhost:8989" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                        <input type="text" name="SONARR_URL" aria-label="Sonarr URL" class="form-control" value="{{ settings.SONARR_URL or '' }}" placeholder="http://localhost:8989" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     </div>
                     <div class="form-group" style="margin-bottom:0.35rem;">
-                        <input type="password" name="SONARR_API_KEY" class="form-control" value="" autocomplete="off"
+                        <input type="password" name="SONARR_API_KEY" aria-label="Sonarr API key" class="form-control" value="" autocomplete="off"
                                placeholder="{{ 'Saved — leave blank to keep' if secret_set.SONARR_API_KEY else 'API Key' }}" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     </div>
                 </div>
@@ -84,10 +84,10 @@
                 <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Plex</div>
                 <div class="form-row">
                     <div class="form-group" style="margin-bottom:0.35rem;">
-                        <input type="text" name="PLEX_URL" class="form-control" value="{{ settings.PLEX_URL or '' }}" placeholder="http://localhost:32400" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                        <input type="text" name="PLEX_URL" aria-label="Plex URL" class="form-control" value="{{ settings.PLEX_URL or '' }}" placeholder="http://localhost:32400" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     </div>
                     <div class="form-group" style="margin-bottom:0.35rem;">
-                        <input type="password" name="PLEX_TOKEN" class="form-control" value="" autocomplete="off"
+                        <input type="password" name="PLEX_TOKEN" aria-label="Plex token" class="form-control" value="" autocomplete="off"
                                placeholder="{{ 'Saved — leave blank to keep' if secret_set.PLEX_TOKEN else 'Token' }}" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     </div>
                 </div>
@@ -102,10 +102,10 @@
                 <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Jellyfin</div>
                 <div class="form-row">
                     <div class="form-group" style="margin-bottom:0.35rem;">
-                        <input type="text" name="JELLYFIN_URL" class="form-control" value="{{ settings.JELLYFIN_URL or '' }}" placeholder="http://localhost:8096" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                        <input type="text" name="JELLYFIN_URL" aria-label="Jellyfin URL" class="form-control" value="{{ settings.JELLYFIN_URL or '' }}" placeholder="http://localhost:8096" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     </div>
                     <div class="form-group" style="margin-bottom:0.35rem;">
-                        <input type="password" name="JELLYFIN_API_KEY" class="form-control" value="" autocomplete="off"
+                        <input type="password" name="JELLYFIN_API_KEY" aria-label="Jellyfin API key" class="form-control" value="" autocomplete="off"
                                placeholder="{{ 'Saved — leave blank to keep' if secret_set.JELLYFIN_API_KEY else 'API Key' }}" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     </div>
                 </div>
@@ -119,7 +119,7 @@
             <!-- Media server choice -->
             <div style="margin-bottom:0.75rem;">
                 <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Media Server</div>
-                <select name="MEDIA_SERVER" class="form-control" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                <select name="MEDIA_SERVER" aria-label="Media server" class="form-control" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     {% set ms = settings.MEDIA_SERVER or 'auto' %}
                     <option value="auto" {% if ms == 'auto' %}selected{% endif %}>Auto — use every configured server</option>
                     <option value="plex" {% if ms == 'plex' %}selected{% endif %}>Plex only</option>
@@ -131,7 +131,8 @@
             <!-- Discord -->
             <div style="margin-bottom:0.75rem;">
                 <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Discord Notifications</div>
-                <input type="text" name="DISCORD_WEBHOOK_URL" class="form-control" value="{{ settings.DISCORD_WEBHOOK_URL or '' }}" placeholder="https://discord.com/api/webhooks/..." style="font-size:0.82rem;padding:0.35rem 0.6rem;">
+                <input type="password" name="DISCORD_WEBHOOK_URL" aria-label="Discord webhook URL" class="form-control" value="" autocomplete="off"
+                       placeholder="{{ 'Saved — leave blank to keep' if secret_set.DISCORD_WEBHOOK_URL else 'https://discord.com/api/webhooks/...' }}" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                 <div class="helper-text">Webhook URL for dub upgrade notifications</div>
             </div>
             <!-- Sonarr Webhook -->
@@ -152,7 +153,7 @@
             <!-- Webhook Secret -->
             <div style="margin-top:0.5rem;">
                 <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Webhook Secret (Optional)</div>
-                <input type="password" name="WEBHOOK_SECRET" class="form-control" value="" autocomplete="off"
+                <input type="password" name="WEBHOOK_SECRET" aria-label="Webhook secret" class="form-control" value="" autocomplete="off"
                        placeholder="{{ 'Saved — leave blank to keep' if secret_set.WEBHOOK_SECRET else 'Leave empty for no auth' }}" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                 <div class="helper-text">If set, append <code style="font-size:0.72rem;padding:0.1rem 0.25rem;background:rgba(255,255,255,0.06);border-radius:2px;">?apikey=YOUR_SECRET</code> to the webhook URL in Sonarr</div>
             </div>
@@ -162,11 +163,11 @@
                 <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Access</div>
                 <div class="form-row">
                     <div class="form-group" style="margin-bottom:0.35rem;">
-                        <input type="text" name="AUTH_USERNAME" class="form-control" value="{{ settings.AUTH_USERNAME or '' }}"
+                        <input type="text" name="AUTH_USERNAME" aria-label="Username" class="form-control" value="{{ settings.AUTH_USERNAME or '' }}"
                                autocomplete="off" placeholder="Username" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     </div>
                     <div class="form-group" style="margin-bottom:0.35rem;">
-                        <input type="password" name="AUTH_PASSWORD" class="form-control" value="" autocomplete="new-password"
+                        <input type="password" name="AUTH_PASSWORD" aria-label="Password" class="form-control" value="" autocomplete="new-password"
                                placeholder="{{ 'Saved — leave blank to keep' if secret_set.AUTH_PASSWORD else 'Password' }}" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     </div>
                 </div>
@@ -299,8 +300,8 @@
             <details style="margin-top:0.5rem;">
                 <summary style="cursor:pointer;font-size:0.78rem;color:var(--text-muted);">Add custom ignore pattern</summary>
                 <div style="display:flex;gap:0.35rem;margin-top:0.35rem;flex-wrap:wrap;">
-                    <input type="text" id="ignore-pattern" name="pattern" class="form-control" style="flex:1;min-width:150px;font-size:0.8rem;padding:0.3rem 0.5rem;" placeholder="e.g. /media/tv/">
-                    <input type="text" id="ignore-note" name="note" class="form-control" style="width:120px;font-size:0.8rem;padding:0.3rem 0.5rem;" placeholder="Note">
+                    <input type="text" id="ignore-pattern" name="pattern" form="ignore-pattern-form" aria-label="Ignore pattern" class="form-control" style="flex:1;min-width:150px;font-size:0.8rem;padding:0.3rem 0.5rem;" placeholder="e.g. /media/tv/">
+                    <input type="text" id="ignore-note" name="note" form="ignore-pattern-form" aria-label="Note" class="form-control" style="width:120px;font-size:0.8rem;padding:0.3rem 0.5rem;" placeholder="Note">
                     <button type="button" class="btn btn-sm btn-primary" style="font-size:0.72rem;padding:0.2rem 0.5rem;"
                             hx-post="/api/ignore-path" hx-target="#ignore-list" hx-swap="innerHTML" hx-include="#ignore-pattern, #ignore-note">Add</button>
                 </div>
@@ -330,65 +331,99 @@
 </form>
 
 <script>
+function el(tag, style, text) {
+    const node = document.createElement(tag);
+    if (style) node.setAttribute('style', style);
+    if (text !== undefined) node.textContent = text;
+    return node;
+}
+function message(container, text, isError) {
+    container.replaceChildren(el('p', isError ? 'color:var(--red);font-size:0.78rem;' : 'font-size:0.78rem;', text));
+    if (!isError) container.firstChild.className = 'text-muted';
+}
+function toggleButton(ignored, onEnable, onIgnore) {
+    const btn = el('button', (ignored
+        ? 'background:rgba(45,212,191,0.12);color:var(--green);border:1px solid rgba(45,212,191,0.3);'
+        : 'background:rgba(244,63,94,0.12);color:var(--red);border:1px solid rgba(244,63,94,0.3);')
+        + 'padding:0.2rem 0.5rem;font-size:0.7rem;', ignored ? 'Enable' : 'Ignore');
+    btn.type = 'button'; btn.className = 'btn btn-sm';
+    btn.addEventListener('click', ignored ? onEnable : onIgnore);
+    return btn;
+}
+function stateBadge(ignored) {
+    return el('span', 'font-size:0.65rem;font-weight:600;color:' + (ignored ? 'var(--red)' : 'var(--green)') + ';text-transform:uppercase;', ignored ? 'IGNORED' : 'ON');
+}
+const ROW_STYLE = 'display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.5rem;border:1px solid var(--border-color);border-radius:6px;margin-bottom:0.3rem;';
+
 async function discoverPlex() {
     const btn = document.getElementById('discover-plex-btn');
     const container = document.getElementById('plex-libraries');
     btn.disabled = true; btn.textContent = '...';
-    container.innerHTML = '<p class="text-muted" style="font-size:0.78rem;">Loading...</p>';
+    message(container, 'Loading...');
     try {
         const resp = await fetch('/api/discover/plex');
         const data = await resp.json();
-        if (data.error) { container.innerHTML = '<p style="color:var(--red);font-size:0.78rem;">' + data.error + '</p>'; return; }
-        let html = '';
+        if (data.error) { message(container, data.error, true); return; }
+        const rows = [];
         for (const lib of data.libraries) {
-            const ign = lib.ignored;
-            const col = ign ? 'var(--red)' : 'var(--green)';
-            const bs = ign ? 'background:rgba(45,212,191,0.12);color:var(--green);border:1px solid rgba(45,212,191,0.3);' : 'background:rgba(244,63,94,0.12);color:var(--red);border:1px solid rgba(244,63,94,0.3);';
             const srv = lib.server || 'Media';
-            const act = ign ? 'removeIgnoreByPattern(\'' + lib.path.replace(/'/g,"\\'") + '\')' : 'addIgnore(\'' + lib.path.replace(/'/g,"\\'") + '\',\'' + srv + ': ' + lib.title.replace(/'/g,"\\'") + '\')';
-            html += '<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.5rem;border:1px solid var(--border-color);border-radius:6px;margin-bottom:0.3rem;">'
-                + '<div style="flex:1;min-width:0;"><div style="font-weight:500;font-size:0.82rem;">' + lib.title + ' <span style="font-size:0.65rem;color:var(--text-muted);font-weight:400;">' + srv + '</span></div><div style="font-size:0.7rem;color:var(--text-muted);font-family:\'JetBrains Mono\',monospace;">' + lib.path + ' (' + (lib.count||0) + ')</div></div>'
-                + '<span style="font-size:0.65rem;font-weight:600;color:' + col + ';text-transform:uppercase;">' + (ign?'IGNORED':'ON') + '</span>'
-                + '<button type="button" class="btn btn-sm" style="' + bs + 'padding:0.2rem 0.5rem;font-size:0.7rem;" onclick="' + act + '">' + (ign?'Enable':'Ignore') + '</button></div>';
+            const row = el('div', ROW_STYLE);
+            const info = el('div', 'flex:1;min-width:0;');
+            const title = el('div', 'font-weight:500;font-size:0.82rem;', lib.title + ' ');
+            title.appendChild(el('span', 'font-size:0.65rem;color:var(--text-muted);font-weight:400;', srv));
+            info.appendChild(title);
+            info.appendChild(el('div', "font-size:0.7rem;color:var(--text-muted);font-family:'JetBrains Mono',monospace;", lib.path + ' (' + (lib.count || 0) + ')'));
+            row.appendChild(info);
+            row.appendChild(stateBadge(lib.ignored));
+            row.appendChild(toggleButton(lib.ignored,
+                () => removeIgnoreByPattern(lib.path),
+                () => addIgnore(lib.path, srv + ': ' + lib.title)));
+            rows.push(row);
         }
-        container.innerHTML = html || '<p class="text-muted" style="font-size:0.78rem;">No show libraries.</p>';
-    } catch(e) { container.innerHTML = '<p style="color:var(--red);font-size:0.78rem;">' + e.message + '</p>'; }
+        if (rows.length) container.replaceChildren(...rows); else message(container, 'No show libraries.');
+    } catch(e) { message(container, e.message, true); }
     finally { btn.disabled = false; btn.textContent = 'Discover'; }
 }
 async function discoverSonarr() {
     const btn = document.getElementById('discover-sonarr-btn');
     const container = document.getElementById('sonarr-sources');
     btn.disabled = true; btn.textContent = '...';
-    container.innerHTML = '<p class="text-muted" style="font-size:0.78rem;">Loading...</p>';
+    message(container, 'Loading...');
     try {
         const resp = await fetch('/api/discover/sonarr');
         const data = await resp.json();
-        if (data.error) { container.innerHTML = '<p style="color:var(--red);font-size:0.78rem;">' + data.error + '</p>'; return; }
-        let html = '';
+        if (data.error) { message(container, data.error, true); return; }
+        const nodes = [];
         for (const rf of data.root_folders) {
-            const ign = rf.ignored;
-            const col = ign ? 'var(--red)' : 'var(--green)';
-            const bs = ign ? 'background:rgba(45,212,191,0.12);color:var(--green);border:1px solid rgba(45,212,191,0.3);' : 'background:rgba(244,63,94,0.12);color:var(--red);border:1px solid rgba(244,63,94,0.3);';
-            const act = ign ? 'removeIgnoreByPattern(\'' + rf.path.replace(/'/g,"\\'") + '\')' : 'addIgnore(\'' + rf.path.replace(/'/g,"\\'") + '\',\'Sonarr folder\')';
-            html += '<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.5rem;border:1px solid var(--border-color);border-radius:6px;margin-bottom:0.3rem;">'
-                + '<div style="flex:1;"><div style="font-size:0.78rem;font-family:\'JetBrains Mono\',monospace;">' + rf.path + '</div><div style="font-size:0.68rem;color:var(--text-muted);">' + (rf.series_count||0) + ' series</div></div>'
-                + '<span style="font-size:0.65rem;font-weight:600;color:' + col + ';text-transform:uppercase;">' + (ign?'IGNORED':'ON') + '</span>'
-                + '<button type="button" class="btn btn-sm" style="' + bs + 'padding:0.2rem 0.5rem;font-size:0.7rem;" onclick="' + act + '">' + (ign?'Enable':'Ignore') + '</button></div>';
+            const row = el('div', ROW_STYLE);
+            const info = el('div', 'flex:1;');
+            info.appendChild(el('div', "font-size:0.78rem;font-family:'JetBrains Mono',monospace;", rf.path));
+            info.appendChild(el('div', 'font-size:0.68rem;color:var(--text-muted);', (rf.series_count || 0) + ' series'));
+            row.appendChild(info);
+            row.appendChild(stateBadge(rf.ignored));
+            row.appendChild(toggleButton(rf.ignored,
+                () => removeIgnoreByPattern(rf.path),
+                () => addIgnore(rf.path, 'Sonarr folder')));
+            nodes.push(row);
         }
         if (data.tags && data.tags.length) {
-            html += '<div style="margin-top:0.5rem;display:flex;flex-wrap:wrap;gap:0.25rem;">';
+            const wrap = el('div', 'margin-top:0.5rem;display:flex;flex-wrap:wrap;gap:0.25rem;');
             for (const t of data.tags) {
                 const ign = t.ignored;
-                const bg = ign ? 'rgba(244,63,94,0.12)' : 'rgba(45,212,191,0.08)';
-                const bd = ign ? 'rgba(244,63,94,0.3)' : 'rgba(45,212,191,0.2)';
-                const tc = ign ? 'var(--red)' : 'var(--text-primary)';
-                const act = ign ? 'removeIgnoreByPattern(\'' + t.label.replace(/'/g,"\\'") + '\')' : 'addIgnore(\'tag:' + t.label.replace(/'/g,"\\'") + '\',\'Sonarr tag\')';
-                html += '<button type="button" onclick="' + act + '" style="padding:0.2rem 0.5rem;border-radius:999px;font-size:0.7rem;font-weight:500;background:' + bg + ';color:' + tc + ';border:1px solid ' + bd + ';cursor:pointer;">' + (ign?'✕ ':'') + t.label + '</button>';
+                const chip = el('button', 'padding:0.2rem 0.5rem;border-radius:999px;font-size:0.7rem;font-weight:500;background:'
+                    + (ign ? 'rgba(244,63,94,0.12)' : 'rgba(45,212,191,0.08)') + ';color:' + (ign ? 'var(--red)' : 'var(--text-primary)')
+                    + ';border:1px solid ' + (ign ? 'rgba(244,63,94,0.3)' : 'rgba(45,212,191,0.2)') + ';cursor:pointer;',
+                    (ign ? '✕ ' : '') + t.label);
+                chip.type = 'button';
+                chip.addEventListener('click', ign
+                    ? () => removeIgnoreByPattern(t.label)
+                    : () => addIgnore('tag:' + t.label, 'Sonarr tag'));
+                wrap.appendChild(chip);
             }
-            html += '</div>';
+            nodes.push(wrap);
         }
-        container.innerHTML = html || '<p class="text-muted" style="font-size:0.78rem;">No folders found.</p>';
-    } catch(e) { container.innerHTML = '<p style="color:var(--red);font-size:0.78rem;">' + e.message + '</p>'; }
+        if (nodes.length) container.replaceChildren(...nodes); else message(container, 'No folders found.');
+    } catch(e) { message(container, e.message, true); }
     finally { btn.disabled = false; btn.textContent = 'Discover'; }
 }
 async function addIgnore(p, n) {
@@ -399,8 +434,15 @@ async function addIgnore(p, n) {
 }
 async function removeIgnoreByPattern(p) {
     const codes = document.getElementById('ignore-list').querySelectorAll('code');
-    for (const c of codes) { if (c.textContent.trim()===p) { c.parentElement.querySelector('button').click(); break; } }
-    setTimeout(() => { discoverPlex(); discoverSonarr(); }, 500);
+    for (const c of codes) {
+        if (c.textContent.trim() !== p) continue;
+        const btn = c.parentElement.querySelector('button');
+        const url = btn.getAttribute('hx-post');
+        const r = await fetch(url, {method: 'POST'});
+        document.getElementById('ignore-list').innerHTML = await r.text();
+        break;
+    }
+    discoverPlex(); discoverSonarr();
 }
 </script>
 <script>

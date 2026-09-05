@@ -11,5 +11,7 @@ data/
 screenshots/
 babel-*.png
 README.md
-unraid/
-docs/
+tests/
+templates/
+.pytest_cache/
+.ruff_cache/

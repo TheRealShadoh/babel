@@ -998,9 +998,21 @@ async def create_upgrade_record(
 
 
 async def get_pending_upgrades(db: aiosqlite.Connection) -> list[dict]:
-    """Get all pending upgrade records (searches triggered, awaiting file change)."""
+    """Pending upgrade records, one per episode (its most recent search).
+
+    Every search adds a pending row and nothing resolves them until the
+    file changes, so a sub-only episode accumulates one per cooldown period.
+    Returning all of them made the download-status check issue one Sonarr
+    history request per row, forever.
+    """
     async with db.execute(
-        "SELECT * FROM upgrade_tracking WHERE result = 'pending' ORDER BY triggered_at DESC"
+        """SELECT * FROM upgrade_tracking
+           WHERE result = 'pending'
+             AND id IN (
+               SELECT MAX(id) FROM upgrade_tracking
+               WHERE result = 'pending' GROUP BY episode_id
+             )
+           ORDER BY triggered_at DESC"""
     ) as cur:
         return _rows_to_dicts(await cur.fetchall())
 

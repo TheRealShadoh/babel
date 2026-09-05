@@ -1,6 +1,6 @@
 import os
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 # Stamped at image build time with the commit being built. The `latest` tag is
 # republished on every push while the semantic version rarely moves, so

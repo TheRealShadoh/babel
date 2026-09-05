@@ -7,7 +7,7 @@
     <Privileged>false</Privileged>
     <Support>https://github.com/TheRealShadoh/babel/issues</Support>
     <Project>https://github.com/TheRealShadoh/babel</Project>
-    <Overview>Babel - Media Dub Detection and Upgrade Tool. Monitors your media library via Sonarr and Plex, detects sub-only episodes, and automatically searches for English dubbed versions. Features include automatic Sonarr searching, upgrade tracking, dub availability lookup via MyAnimeList, Plex collection management, Discord notifications, and a polished web dashboard.</Overview>
+    <Overview>Babel - Media Dub Detection and Upgrade Tool. Monitors your media library via Sonarr and Plex and/or Jellyfin, detects sub-only episodes, and automatically searches for English dubbed versions. Features include automatic Sonarr searching, upgrade tracking, Sonarr monitor-status sync, dub availability lookup via MyAnimeList and Anime News Network, Plex/Jellyfin collection management, Discord notifications, built-in diagnostics, and a polished web dashboard.</Overview>
     <Category>MediaApp:Other</Category>
     <WebUI>http://[IP]:[PORT:8686]</WebUI>
     <Icon>https://raw.githubusercontent.com/TheRealShadoh/babel/master/icon.png</Icon>

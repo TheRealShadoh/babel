@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from markupsafe import escape as esc
 
-from src.config import get_settings, get_effective_settings, translate_path, cfg_bool
+from src.config import get_settings, get_effective_settings, translate_path, cfg_bool, log_file_path
 from src.db.database import get_db
 from src.db import models
 from src.scanner.engine import run_scan, check_download_status, resolve_stuck_imports
@@ -40,7 +40,10 @@ def _spawn(coro) -> asyncio.Task:
 # Rendered into the settings form in place of a stored secret. Submitting the
 # field unchanged (i.e. empty) leaves the stored value alone, so the API key
 # and Plex token never travel back to the browser in the page source.
-SECRET_KEYS = frozenset({"SONARR_API_KEY", "PLEX_TOKEN", "JELLYFIN_API_KEY", "WEBHOOK_SECRET", "AUTH_PASSWORD"})
+SECRET_KEYS = frozenset({
+    "SONARR_API_KEY", "PLEX_TOKEN", "JELLYFIN_API_KEY", "DISCORD_WEBHOOK_URL",
+    "WEBHOOK_SECRET", "AUTH_PASSWORD",
+})
 
 
 def _to_utc_display(value: str | None) -> str | None:
@@ -82,7 +85,6 @@ SETTING_KEYS = (
     "PLEX_PATH_PREFIX",
     "JELLYFIN_PATH_PREFIX",
     "ANIME_FILTER",
-    "LOG_LEVEL",
     "SHOW_THUMBNAILS",
     "MAX_SEARCH_ATTEMPTS",
     "AUTO_TAG_SONARR",
@@ -460,11 +462,7 @@ async def resolve_imports(request: Request):
 async def search_episode(request: Request, episode_id: int):
     cfg = await get_effective_settings()
     if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
-        return _templates(request).TemplateResponse(
-            request,
-            "partials/episode_row.html",
-            {"episode_id": episode_id, "success": False, "message": "Sonarr is not configured."},
-        )
+        return _search_status(False, "Sonarr is not configured.")
     sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
     db = await get_db(cfg.get("DB_PATH", get_settings().DB_PATH))
     try:
@@ -482,10 +480,15 @@ async def search_episode(request: Request, episode_id: int):
         await sonarr.close()
         await db.close()
 
-    return _templates(request).TemplateResponse(
-        request,
-        "partials/episode_row.html",
-        {"episode_id": episode_id, "success": success, "message": message},
+    return _search_status(success, message)
+
+
+def _search_status(success: bool, message: str) -> HTMLResponse:
+    """Replaces the per-episode Search button with the outcome."""
+    badge = "badge-green" if success else "badge-red"
+    return HTMLResponse(
+        f'<span class="badge {badge}" title="{esc(message)}">'
+        f'{"Searched" if success else "Failed"}</span>'
     )
 
 
@@ -574,19 +577,39 @@ async def toggle_series_exclude(request: Request, series_id: int):
     return HTMLResponse(btn_html)
 
 
+def _credential_for_test(
+    given: str, url: str, stored_url: str, stored_secret: str, url_label: str, secret_label: str,
+) -> tuple[str, HTMLResponse | None]:
+    """Decide which secret a connection test may use.
+
+    A blank secret field means "use the saved one" — but only against the URL
+    it was saved for. Sending the stored key to whatever URL is typed into the
+    form would hand it to any listener that answers 200, and auto-save that
+    listener as the new server.
+    """
+    if not url:
+        return "", HTMLResponse(f'<span style="color:#e17055">{esc(url_label)} is required.</span>')
+    if given:
+        return given, None
+    if stored_secret and url.rstrip("/") == (stored_url or "").rstrip("/"):
+        return stored_secret, None
+    return "", HTMLResponse(
+        f'<span style="color:#e17055">Enter the {esc(secret_label)} to test a new URL.</span>'
+    )
+
+
 @router.post("/api/test-sonarr")
 async def test_sonarr(request: Request):
     form = await request.form()
     settings = get_settings()
     cfg = await get_effective_settings()
     url = form.get("SONARR_URL", "") or cfg.get("SONARR_URL", "")
-    # The form no longer carries the stored key, so fall back to what is saved.
-    api_key = form.get("SONARR_API_KEY", "") or cfg.get("SONARR_API_KEY", "")
-
-    if not url:
-        return HTMLResponse(
-            '<span style="color:#e17055">Sonarr URL is required.</span>'
-        )
+    api_key, problem = _credential_for_test(
+        form.get("SONARR_API_KEY", ""), url, cfg.get("SONARR_URL", ""),
+        cfg.get("SONARR_API_KEY", ""), "Sonarr URL", "API key",
+    )
+    if problem:
+        return problem
 
     sonarr = SonarrClient(url, api_key)
     try:
@@ -621,12 +644,12 @@ async def test_plex(request: Request):
     settings = get_settings()
     cfg = await get_effective_settings()
     url = form.get("PLEX_URL", "") or cfg.get("PLEX_URL", "")
-    token = form.get("PLEX_TOKEN", "") or cfg.get("PLEX_TOKEN", "")
-
-    if not url:
-        return HTMLResponse(
-            '<span style="color:#e17055">Plex URL is required.</span>'
-        )
+    token, problem = _credential_for_test(
+        form.get("PLEX_TOKEN", ""), url, cfg.get("PLEX_URL", ""),
+        cfg.get("PLEX_TOKEN", ""), "Plex URL", "token",
+    )
+    if problem:
+        return problem
 
     plex = PlexClient(url, token)
     try:
@@ -663,12 +686,12 @@ async def test_jellyfin(request: Request):
     settings = get_settings()
     cfg = await get_effective_settings()
     url = form.get("JELLYFIN_URL", "") or cfg.get("JELLYFIN_URL", "")
-    api_key = form.get("JELLYFIN_API_KEY", "") or cfg.get("JELLYFIN_API_KEY", "")
-
-    if not url:
-        return HTMLResponse(
-            '<span style="color:#e17055">Jellyfin URL is required.</span>'
-        )
+    api_key, problem = _credential_for_test(
+        form.get("JELLYFIN_API_KEY", ""), url, cfg.get("JELLYFIN_URL", ""),
+        cfg.get("JELLYFIN_API_KEY", ""), "Jellyfin URL", "API key",
+    )
+    if problem:
+        return problem
 
     jellyfin = JellyfinClient(url, api_key)
     try:
@@ -972,9 +995,13 @@ async def scan_progress(request: Request):
     stopping = _scan_cancel.is_set()
 
     if p["phase"] == "indexing_plex":
-        status_html = '<span class="badge badge-blue" style="margin-right:0.4rem;">Indexing Plex</span>'
-        # Try to get live Plex indexing progress
         from src.scanner.engine import _plex_client_ref
+        from src.scanner.media_server import client_label
+        label = client_label(_plex_client_ref) if _plex_client_ref is not None else "media server"
+        status_html = (
+            f'<span class="badge badge-blue" style="margin-right:0.4rem;">Indexing {esc(label)}</span>'
+        )
+        # Try to get live indexing progress
         if _plex_client_ref is not None:
             plex_prog = _plex_client_ref.get_index_progress()
             if plex_prog.get("total", 0) > 0:
@@ -1461,8 +1488,7 @@ _MAX_LOG_LINES = 2000
 @router.get("/api/logs")
 async def get_logs(request: Request, lines: int = 200, level: str = ""):
     """Return the last N lines of the log file."""
-    from pathlib import Path
-    log_file = Path(__file__).resolve().parent.parent.parent / "data" / "babel.log"
+    log_file = log_file_path(get_settings().DB_PATH)
 
     lines = max(1, min(int(lines), _MAX_LOG_LINES))
 

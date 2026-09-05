@@ -46,7 +46,7 @@
 **Integrations**
 - Sonarr: custom format creation, tag syncing, monitor-status updates, webhook support for instant upgrade detection
 - Plex: audio indexing, collection management (Dubbed Anime, Sub-Only, etc.)
-- Jellyfin: the same audio indexing and collection management, as an alternative to Plex
+- Jellyfin: the same audio indexing and collection management, alongside Plex or instead of it
 - Discord: webhook notifications for scan results and dub upgrades
 - Sonarr webhook endpoint for real-time import awareness
 
@@ -71,11 +71,19 @@ services:
       - "8686:8686"
     volumes:
       - babel-data:/app/data
+      # Strongly recommended: the same media Sonarr writes to, read-only.
+      # Without it ffprobe cannot read anything, so an episode the media
+      # server has not indexed yet stays "unknown" and the Sonarr webhook
+      # (which probes with ffprobe) does nothing.
+      - /path/to/your/media:/media:ro
     environment:
       - SONARR_URL=http://your-server:8989
       - SONARR_API_KEY=your-api-key
       - PLEX_URL=http://your-server:32400
       - PLEX_TOKEN=your-plex-token
+      # If Sonarr sees the media at a different path than /media, map it:
+      # - SONARR_PATH_PREFIX=/tv
+      # - LOCAL_PATH_PREFIX=/media
     restart: unless-stopped
 
 volumes:
@@ -86,39 +94,57 @@ volumes:
 docker compose up -d
 ```
 
-Open `http://localhost:8686` to access the dashboard.
+Open `http://localhost:8686` to access the dashboard. Point `SONARR_URL` and
+`PLEX_URL` at the host or container name, not `localhost` — inside the
+container that is Babel itself.
 
 ## Configuration
 
-All settings can be configured via environment variables or the web UI Settings page.
+Every setting can be set as an environment variable. Most can also be changed
+on the Settings page, where they take effect without a restart and override
+the environment — the exceptions are marked *env only* below.
 
 | Variable | Default | Description |
 |---|---|---|
-| `SONARR_URL` | | Sonarr server URL (optional — Babel can run Plex-only) |
+| `SONARR_URL` | | Sonarr server URL (optional — Babel can run against a media server alone) |
 | `SONARR_API_KEY` | | Sonarr API key (Settings > General) |
 | `PLEX_URL` | | Plex server URL |
 | `PLEX_TOKEN` | | Plex authentication token |
-| `JELLYFIN_URL` | | Jellyfin server URL (alternative to Plex) |
+| `JELLYFIN_URL` | | Jellyfin server URL (alongside Plex or instead of it) |
 | `JELLYFIN_API_KEY` | | Jellyfin API key (Dashboard > API Keys) |
 | `MEDIA_SERVER` | `auto` | `auto` uses every configured server; `plex`/`jellyfin` restrict a scan to one; `none` disables both |
 | `SCAN_INTERVAL_HOURS` | `6` | Hours between automatic scans |
 | `TARGET_LANGUAGE` | `eng` | ISO 639-2 language code to search for |
 | `SEARCH_COOLDOWN_DAYS` | `7` | Days before re-searching an episode |
 | `SEARCH_RATE_LIMIT` | `5` | Max Sonarr searches per minute |
+| `MAX_SEARCH_ATTEMPTS` | `3` | Searches per 7-day window before an episode with no results is left alone; `0` = unlimited |
 | `ANIME_FILTER` | `type` | Which Sonarr series to scan: `type` (series type "anime"), `all`, or `tag:YourTag` |
+| `SONARR_PATH_PREFIX` | | The root Sonarr reports files under (e.g. `/tv`), if it differs from Babel's |
+| `LOCAL_PATH_PREFIX` | `/media` | Where that same root is mounted inside the Babel container |
+| `PLEX_PATH_PREFIX` | | Where Plex sees that root, if different again (defaults to `LOCAL_PATH_PREFIX`) |
+| `JELLYFIN_PATH_PREFIX` | | Where Jellyfin sees it (defaults to `PLEX_PATH_PREFIX`, then `LOCAL_PATH_PREFIX`) |
+| `AUTO_TAG_SONARR` | `true` | Tag series in Sonarr as `babel:dubbed` / `babel:partial-dub` / `babel:sub-only` |
+| `AUTO_COLLECTIONS_PLEX` | `true` | Maintain "Dubbed Anime" / "Sub-Only Anime" collections on Plex and Jellyfin |
+| `AUTO_RESOLVE_IMPORTS` | `true` | Fix stuck Sonarr imports for episodes Babel searched for |
+| `STUCK_IMPORT_DRY_RUN` | `false` | Log what stuck-import resolution would do without touching the queue |
+| `SHOW_THUMBNAILS` | `true` | Poster art in the dashboard |
 | `AUTO_MONITOR_DUBS` | `true` | Monitor episodes in Sonarr when a dub is available, so Sonarr keeps looking on its own |
 | `DUB_LOOKUP_ANN` | `true` | Check Anime News Network when MyAnimeList cannot settle whether a dub exists |
 | `DISCORD_WEBHOOK_URL` | | Discord webhook for notifications |
 | `WEBHOOK_SECRET` | | If set, the Sonarr webhook requires `?apikey=` (or `X-Api-Key` header) to match |
 | `AUTH_USERNAME` / `AUTH_PASSWORD` | | If both are set, the whole dashboard requires HTTP Basic Auth. Overrides anything set in Settings → Access |
-| `ALLOW_CROSS_ORIGIN_WRITES` | `false` | Allow state-changing requests from other origins (off by default) |
-| `BABEL_BUILD` | | Stamped into the image at build time; surfaced as `revision` on `/api/health` |
-| `PUID` / `PGID` | `1000` / `1000` | UID/GID the container runs as — match your host's media/data ownership |
-| `FFPROBE_TIMEOUT` | `30` | Seconds a single ffprobe may run before it is killed |
-| `FFPROBE_MAX_CONCURRENT` | `4` | Max simultaneous ffprobe children — caps what a hung mount can strand |
-| `FFPROBE_SLOT_TIMEOUT` | `15` | Seconds to wait for a free probe slot before skipping the file |
-| `WATCHDOG_UNHEALTHY_LAG` | `15` | Event-loop lag (s) above which `/api/health` returns 503 |
-| `WATCHDOG_ABORT_LAG` | `300` | Event-loop lag (s) after which Babel exits so Docker restarts it; `0` disables |
+| `ALLOW_CROSS_ORIGIN_WRITES` | `false` | *env only.* Allow state-changing requests from other origins (off by default) |
+| `LOG_LEVEL` | `INFO` | *env only.* Python log level |
+| `DB_PATH` | `/app/data/babel.db` | *env only.* SQLite database; the log file is written next to it |
+| `BABEL_BUILD` | | *env only.* Stamped into the image at build time; surfaced as `revision` on `/api/health` |
+| `PUID` / `PGID` | `1000` / `1000` | *env only.* UID/GID the container runs as — match your host's media/data ownership |
+| `FFPROBE_TIMEOUT` | `30` | *env only.* Seconds a single ffprobe may run before it is killed |
+| `FFPROBE_KILL_GRACE` | `5` | *env only.* Seconds after SIGTERM before a stuck ffprobe is SIGKILLed |
+| `FFPROBE_MAX_CONCURRENT` | `4` | *env only.* Max simultaneous ffprobe children — caps what a hung mount can strand |
+| `FFPROBE_SLOT_TIMEOUT` | `15` | *env only.* Seconds to wait for a free probe slot before skipping the file |
+| `WATCHDOG_INTERVAL` | `1` | *env only.* Seconds between event-loop heartbeats |
+| `WATCHDOG_UNHEALTHY_LAG` | `15` | *env only.* Event-loop lag (s) above which `/api/health` returns 503 |
+| `WATCHDOG_ABORT_LAG` | `300` | *env only.* Event-loop lag (s) after which Babel exits so Docker restarts it; `0` disables |
 
 ### Plex, Jellyfin, or both
 
@@ -243,7 +269,7 @@ Babel is built so that a hung mount degrades instead of wedging:
   for being *unhealthy* — only for exiting — so this is what closes that gap.
 
 `scripts/repro_hung_mount.py` exercises all of the above against a fake mount
-that never responds; run it with `--legacy` to see the pre-1.1.1 behaviour.
+that never responds; run it with `--legacy` to see the behaviour before the 1.1 hardening.
 
 ### Security
 
@@ -262,7 +288,9 @@ compose if you ever lock yourself out.
 
 `GET /api/health` and `POST /api/webhook/sonarr` are always reachable without
 Basic Auth credentials (health checks and Sonarr can't complete an interactive
-login) — set `WEBHOOK_SECRET` to authenticate the webhook instead.
+login). **Set `WEBHOOK_SECRET`**: without it, anything that can reach the port
+can post a webhook that rewrites an episode's status. The path in a webhook is
+only ever probed if it is an absolute local path, never a URL.
 
 Because the dashboard's forms carry no per-request token, Babel also refuses
 state-changing requests that arrive from another origin — otherwise any page
@@ -283,11 +311,15 @@ For instant upgrade detection instead of waiting for scan cycles:
 
 ## Unraid Installation
 
+A container template is in [`templates/babel.xml`](templates/babel.xml).
+Either import it (Docker > Add Container > Template repositories) or set the
+container up by hand:
+
 1. In the Unraid web UI, go to **Docker > Add Container**
 2. Set **Repository** to `therealshadoh/babel:latest`
-3. Configure ports (8686), appdata path, and environment variables
-4. Click **Apply**
-5. Access the web UI at `http://your-server:8686`
+3. Map port 8686, the appdata path to `/app/data`, and your media share to `/media` (read-only)
+4. Set the Sonarr and Plex/Jellyfin environment variables
+5. Click **Apply** and open `http://your-server:8686`
 
 ## How It Works
 
@@ -331,7 +363,19 @@ a read-only mode (detection and collections, no searches).
 | `POST /api/resolve-imports` | Fix stuck Sonarr imports |
 | `POST /api/lookup-dubs` | Run the dub availability check (MyAnimeList, then ANN where needed) |
 | `POST /api/setup-sonarr-dub` | Create/assign a Sonarr custom format that prefers dual-audio releases |
-| `GET /api/diagnostics` | Why a scan is finding nothing: connections, filter match, paths, ignores |
+| `GET /api/diagnostics` | Why a scan is finding nothing: connections, filter match, paths, ignores, dub-lookup reachability |
+| `POST /api/search/{episode_id}` | Trigger a Sonarr search for one episode |
+| `POST /api/search-all/{series_id}` | Search every sub-only episode of a series |
+| `POST /api/series/{series_id}/exclude` | Toggle a series out of automatic searching |
+| `GET /api/scan/progress` | Live scan progress (HTML partial) |
+| `GET /api/logs?lines=200&level=ERROR` | Tail the application log |
+| `POST /api/test-sonarr` · `/api/test-plex` · `/api/test-jellyfin` | Connection tests; a new URL requires its key in the form |
+| `GET /api/discover/sonarr` · `/api/discover/plex` | Root folders/tags and media-server libraries, with ignore state |
+| `POST /api/ignore-path` · `/api/ignore-path/remove/{id}` | Manage ignore patterns |
+
+State-changing endpoints require a same-origin browser request (or
+`ALLOW_CROSS_ORIGIN_WRITES=true`) and, when auth is configured, Basic Auth.
+Only `/api/health` and the Sonarr webhook are exempt from auth.
 
 ## Data & Backups
 

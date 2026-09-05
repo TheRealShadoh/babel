@@ -3,6 +3,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+_MAX_DESCRIPTION = 4096
+_MAX_TITLE = 256
+
 
 async def send_discord_embed(webhook_url: str, title: str, description: str,
                              color: int = 0x2dd4bf, fields: list = None,
@@ -10,7 +13,11 @@ async def send_discord_embed(webhook_url: str, title: str, description: str,
                              client: httpx.AsyncClient | None = None):
     if not webhook_url:
         return
-    embed = {"title": title, "description": description, "color": color,
+    # Discord rejects the whole message past these limits, silently from the
+    # sender's point of view unless the status is checked.
+    if len(description) > _MAX_DESCRIPTION:
+        description = description[:_MAX_DESCRIPTION - 1] + "…"
+    embed = {"title": title[:_MAX_TITLE], "description": description, "color": color,
              "footer": {"text": "Babel — Media Dub Monitor"}}
     if fields:
         embed["fields"] = fields
@@ -18,10 +25,15 @@ async def send_discord_embed(webhook_url: str, title: str, description: str,
         embed["thumbnail"] = {"url": thumbnail_url}
     try:
         if client is not None:
-            await client.post(webhook_url, json={"embeds": [embed]})
+            resp = await client.post(webhook_url, json={"embeds": [embed]})
         else:
             async with httpx.AsyncClient(timeout=10) as _client:
-                await _client.post(webhook_url, json={"embeds": [embed]})
+                resp = await _client.post(webhook_url, json={"embeds": [embed]})
+        if resp.status_code >= 400:
+            logger.warning(
+                "Discord rejected the notification (%d): %s",
+                resp.status_code, resp.text[:200],
+            )
     except Exception as e:
         logger.warning("Discord notification failed: %s", e)
 

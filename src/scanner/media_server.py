@@ -145,6 +145,11 @@ class MediaServerGroup:
     def __len__(self) -> int:
         return len(self.members)
 
+    @property
+    def partial(self) -> bool:
+        """True if any member's last library read dropped something."""
+        return any(getattr(client, "partial", False) for client, _ in self.members)
+
     # -- connection ----------------------------------------------------
 
     async def test_connection(self) -> tuple[bool, str]:

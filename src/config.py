@@ -1,5 +1,6 @@
 import logging
 import time
+from pathlib import Path
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings
@@ -29,7 +30,6 @@ class Settings(BaseSettings):
     PLEX_PATH_PREFIX: str = ""
     JELLYFIN_PATH_PREFIX: str = ""
     ANIME_FILTER: str = "type"
-    WEB_PORT: int = 8686
     LOG_LEVEL: str = "INFO"
     DB_PATH: str = "/app/data/babel.db"
     WEBHOOK_SECRET: str = ""
@@ -85,6 +85,15 @@ ISO_639_MAP: dict[str, str] = {
 }
 
 
+def _has_path_prefix(path: str, prefix: str) -> bool:
+    """True if *prefix* is a leading path component of *path*.
+
+    A plain startswith would let "/tv" rewrite "/tv-anime/…" and "/data"
+    rewrite "/database/…", producing paths that do not exist.
+    """
+    return path == prefix or path.startswith(prefix + "/")
+
+
 def translate_path(sonarr_path: str, target: str, cfg: dict) -> str:
     """Rewrite a Sonarr-reported path to the equivalent local or Plex path.
 
@@ -92,8 +101,8 @@ def translate_path(sonarr_path: str, target: str, cfg: dict) -> str:
     dict (see get_effective_settings) so that DB-configured path prefixes take
     effect without a restart.
     """
-    prefix = cfg.get("SONARR_PATH_PREFIX", "")
-    if not prefix or not sonarr_path.startswith(prefix):
+    prefix = (cfg.get("SONARR_PATH_PREFIX", "") or "").rstrip("/")
+    if not prefix or not _has_path_prefix(sonarr_path, prefix):
         return sonarr_path
     if target == "plex":
         replacement = cfg.get("PLEX_PATH_PREFIX", "") or cfg.get("LOCAL_PATH_PREFIX", "/media")
@@ -107,7 +116,16 @@ def translate_path(sonarr_path: str, target: str, cfg: dict) -> str:
         )
     else:
         replacement = cfg.get("LOCAL_PATH_PREFIX", "/media")
-    return sonarr_path.replace(prefix, replacement, 1)
+    return replacement.rstrip("/") + sonarr_path[len(prefix):]
+
+
+def log_file_path(db_path: str) -> Path:
+    """The application log lives next to the database.
+
+    Deriving it from DB_PATH keeps both inside whatever directory the operator
+    mounted; a fixed /app/data would lose the log for anyone who moved the DB.
+    """
+    return Path(db_path).resolve().parent / "babel.log"
 
 
 def cfg_bool(value, default: bool = True) -> bool:

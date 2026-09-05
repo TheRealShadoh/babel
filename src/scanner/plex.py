@@ -24,6 +24,10 @@ class PlexClient:
         self._path_index: dict[str, list[dict]] | None = None
         self._name_index: dict[str, list[dict]] | None = None
         self._stats = {"hit_path": 0, "hit_name": 0, "miss": 0}
+        # True once a library read has dropped anything (a show or episode
+        # that failed to load). The engine must not prune against such a read:
+        # a show that failed to load is indistinguishable from a deleted one.
+        self.partial = False
         self._cancel = threading.Event()
         self._index_progress = {"current": 0, "total": 0, "section": ""}
 
@@ -223,6 +227,7 @@ class PlexClient:
                         try:
                             episode.reload()
                         except Exception:
+                            self.partial = True
                             continue
 
                         for media in episode.media:
@@ -258,6 +263,7 @@ class PlexClient:
                         break  # one media per episode
                 except Exception as e:
                     logger.warning("Error scanning show '%s': %s", show.title, e)
+                    self.partial = True
                     continue
 
                 if series_data["episodes"]:
