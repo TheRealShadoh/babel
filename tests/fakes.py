@@ -146,7 +146,7 @@ def base_cfg(**overrides):
         "AUTO_TAG_SONARR": "false",
         "AUTO_COLLECTIONS_PLEX": "false",
         "AUTO_RESOLVE_IMPORTS": "false",
-        "AUTO_MONITOR_DUBS": "false",
+        "AUTO_MONITOR_DUBS": "true",
         "MEDIA_SERVER": "auto",
         "DISCORD_WEBHOOK_URL": "",
         "DB_PATH": "/tmp/babel_test_env.db",

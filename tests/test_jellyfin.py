@@ -295,7 +295,12 @@ async def test_media_server_only_scan_runs_against_jellyfin(monkeypatch, tmp_pat
         }
 
     monkeypatch.setattr(engine, "get_effective_settings", fake_cfg)
-    monkeypatch.setattr(engine, "create_media_client", lambda cfg: (make_client(handler), "jellyfin"))
+    from src.scanner.media_server import MediaServerGroup
+
+    monkeypatch.setattr(
+        engine, "create_media_group",
+        lambda cfg: MediaServerGroup([(make_client(handler), "jellyfin")], cfg),
+    )
 
     result = await engine.run_scan()
 

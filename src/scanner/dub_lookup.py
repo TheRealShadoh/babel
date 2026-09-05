@@ -203,7 +203,7 @@ async def monitor_newly_dubbed(db, cfg: dict, newly_available: list[dict]) -> in
     from src.config import cfg_bool
     from src.db import models
 
-    if not cfg_bool(cfg.get("AUTO_MONITOR_DUBS"), default=False):
+    if not cfg_bool(cfg.get("AUTO_MONITOR_DUBS")):
         return 0
     if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
         return 0

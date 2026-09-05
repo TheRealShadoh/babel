@@ -16,7 +16,7 @@ import os
 from src.config import get_effective_settings, get_settings, translate_path
 from src.db import models
 from src.db.database import get_db
-from src.scanner.media_server import select_media_server, server_label
+from src.scanner.media_server import build_client, select_media_servers, server_label
 from src.scanner.sonarr import SonarrClient
 
 logger = logging.getLogger(__name__)
@@ -135,55 +135,58 @@ async def _diagnose_sonarr(cfg: dict, checks: list[dict]) -> list[str]:
         await sonarr.close()
 
 
-async def _diagnose_media_server(cfg: dict, checks: list[dict]) -> list[str]:
-    """Check the selected media server. Returns sample library paths."""
-    from src.scanner.media_server import create_media_client
+async def _diagnose_media_server(cfg: dict, checks: list[dict]) -> None:
+    """Check every media server the current settings would use.
 
-    kind = select_media_server(cfg)
-    if kind == "none":
+    Plex and Jellyfin are configured independently, so each one is reported
+    on its own line: with both set up, one being down is a warning about that
+    server, not a verdict on the other.
+    """
+    kinds = select_media_servers(cfg)
+    if not kinds:
         checks.append(_check(
             "Media server", INFO, "No media server configured",
             "Without Plex or Jellyfin, audio detection falls back to ffprobe, "
             "which needs the media mounted inside the container.",
         ))
-        return []
+        return
 
-    client, _ = create_media_client(cfg)
-    label = server_label(kind)
-    try:
-        ok, message = await client.test_connection()
-        if not ok:
+    for kind in kinds:
+        label = server_label(kind)
+        client = build_client(kind, cfg)
+        try:
+            ok, message = await client.test_connection()
+            if not ok:
+                checks.append(_check(
+                    label, ERROR, message,
+                    f"Check the {label} URL and credential in Settings.",
+                ))
+                continue
+            checks.append(_check(label, OK, message))
+
+            libraries = await client.get_libraries()
+            if not libraries:
+                checks.append(_check(
+                    f"{label} libraries", WARN, "No TV/show libraries found",
+                    f"Babel only reads show-type libraries. Confirm the {label} "
+                    "token/API key can see them.",
+                ))
+                continue
+
+            total = sum(lib.get("count", 0) for lib in libraries)
+            names = ", ".join(
+                f"{lib['title']} ({lib.get('count', 0)})" for lib in libraries[:5]
+            )
             checks.append(_check(
-                label, ERROR, message,
-                f"Check the {label} URL and credential in Settings.",
+                f"{label} libraries", OK if total else WARN,
+                f"{len(libraries)} show library location(s), {total} episodes: {names}",
+                "" if total else "The libraries are empty — nothing to match against.",
             ))
-            return []
-        checks.append(_check(label, OK, message))
-
-        libraries = await client.get_libraries()
-        if not libraries:
-            checks.append(_check(
-                f"{label} libraries", WARN, "No TV/show libraries found",
-                f"Babel only reads show-type libraries. Confirm the {label} "
-                "token/API key can see them.",
-            ))
-            return []
-
-        total = sum(lib.get("count", 0) for lib in libraries)
-        names = ", ".join(f"{lib['title']} ({lib.get('count', 0)})" for lib in libraries[:5])
-        checks.append(_check(
-            f"{label} libraries", OK
-            if total else WARN,
-            f"{len(libraries)} show library location(s), {total} episodes: {names}",
-            "" if total else "The libraries are empty — nothing to match against.",
-        ))
-        return [lib["path"] for lib in libraries if lib.get("path")]
-    except Exception as e:
-        logger.exception("Media server diagnostics failed")
-        checks.append(_check(label, ERROR, f"Diagnostics failed: {e}"))
-        return []
-    finally:
-        await client.close()
+        except Exception as e:
+            logger.exception("%s diagnostics failed", label)
+            checks.append(_check(label, ERROR, f"Diagnostics failed: {e}"))
+        finally:
+            await client.close()
 
 
 async def _diagnose_paths(cfg: dict, sonarr_samples: list[str], checks: list[dict]) -> None:

@@ -185,3 +185,48 @@ async def test_run_diagnostics_flags_a_filter_that_matches_nothing(monkeypatch, 
     assert "0 of 2 series" in checks["Series filter"]["message"]
     assert "all" in checks["Series filter"]["hint"]
     assert report["summary"]["errors"] == 1
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_reports_each_media_server_separately(monkeypatch, tmp_path):
+    """With both configured, one being down says nothing about the other."""
+    from src.scanner import diagnostics
+
+    db_path = str(tmp_path / "diag3.db")
+    await init_db(db_path)
+
+    class FakeServer:
+        def __init__(self, kind):
+            self.kind = kind
+
+        async def test_connection(self):
+            if self.kind == "plex":
+                return False, "Cannot reach Plex: timed out"
+            return True, "Connected to Home (Jellyfin v10.10)"
+
+        async def get_libraries(self):
+            return [{"id": "1", "title": "Anime", "type": "show", "path": "/data", "count": 12}]
+
+        async def close(self):
+            pass
+
+    async def fake_cfg():
+        return {"SONARR_URL": "", "SONARR_API_KEY": "",
+                "PLEX_URL": "http://plex:32400", "PLEX_TOKEN": "t",
+                "JELLYFIN_URL": "http://jf:8096", "JELLYFIN_API_KEY": "k",
+                "MEDIA_SERVER": "auto", "DB_PATH": db_path}
+
+    class _Settings:
+        DB_PATH = db_path
+
+    monkeypatch.setattr(diagnostics, "get_effective_settings", fake_cfg)
+    monkeypatch.setattr(diagnostics, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(diagnostics, "build_client", lambda kind, cfg: FakeServer(kind))
+
+    report = await diagnostics.run_diagnostics()
+    checks = {c["name"]: c for c in report["checks"]}
+
+    assert checks["Plex"]["level"] == "error"
+    assert checks["Jellyfin"]["level"] == "ok"
+    assert checks["Jellyfin libraries"]["level"] == "ok"
+    assert "Plex libraries" not in checks  # an unreachable server is not probed further

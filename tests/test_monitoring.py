@@ -52,13 +52,26 @@ async def test_searched_episodes_are_monitored_when_enabled(db):
 
 
 @pytest.mark.asyncio
-async def test_monitoring_is_off_by_default(db):
+async def test_monitoring_can_be_turned_off(db):
     sonarr, plex = sub_only_library()
-    result = await run_scan(db, base_cfg(), sonarr, plex)
+    result = await run_scan(db, base_cfg(AUTO_MONITOR_DUBS="false"), sonarr, plex)
 
-    assert sonarr.searched_ids == [[101]]
+    assert sonarr.searched_ids == [[101]]  # the search still happens
     assert sonarr.monitored_calls == []
     assert result["monitored"] == 0
+
+
+@pytest.mark.asyncio
+async def test_monitoring_is_on_when_the_setting_is_absent(db):
+    """Settings written before this option existed get the on-by-default."""
+    cfg = base_cfg()
+    del cfg["AUTO_MONITOR_DUBS"]
+    sonarr, plex = sub_only_library()
+
+    result = await run_scan(db, cfg, sonarr, plex)
+
+    assert sonarr.monitored_calls == [([101], True)]
+    assert result["monitored"] == 1
 
 
 @pytest.mark.asyncio

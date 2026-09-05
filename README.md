@@ -100,13 +100,13 @@ All settings can be configured via environment variables or the web UI Settings 
 | `PLEX_TOKEN` | | Plex authentication token |
 | `JELLYFIN_URL` | | Jellyfin server URL (alternative to Plex) |
 | `JELLYFIN_API_KEY` | | Jellyfin API key (Dashboard > API Keys) |
-| `MEDIA_SERVER` | `auto` | Which server supplies audio data: `auto`, `plex`, `jellyfin`, or `none` |
+| `MEDIA_SERVER` | `auto` | `auto` uses every configured server; `plex`/`jellyfin` restrict a scan to one; `none` disables both |
 | `SCAN_INTERVAL_HOURS` | `6` | Hours between automatic scans |
 | `TARGET_LANGUAGE` | `eng` | ISO 639-2 language code to search for |
 | `SEARCH_COOLDOWN_DAYS` | `7` | Days before re-searching an episode |
 | `SEARCH_RATE_LIMIT` | `5` | Max Sonarr searches per minute |
 | `ANIME_FILTER` | `type` | Which Sonarr series to scan: `type` (series type "anime"), `all`, or `tag:YourTag` |
-| `AUTO_MONITOR_DUBS` | `false` | Monitor episodes in Sonarr when a dub is available, so Sonarr keeps looking on its own |
+| `AUTO_MONITOR_DUBS` | `true` | Monitor episodes in Sonarr when a dub is available, so Sonarr keeps looking on its own |
 | `DISCORD_WEBHOOK_URL` | | Discord webhook for notifications |
 | `WEBHOOK_SECRET` | | If set, the Sonarr webhook requires `?apikey=` (or `X-Api-Key` header) to match |
 | `AUTH_USERNAME` / `AUTH_PASSWORD` | | If both are set, the whole dashboard requires HTTP Basic Auth. Overrides anything set in Settings → Access |
@@ -119,33 +119,40 @@ All settings can be configured via environment variables or the web UI Settings 
 | `WATCHDOG_UNHEALTHY_LAG` | `15` | Event-loop lag (s) above which `/api/health` returns 503 |
 | `WATCHDOG_ABORT_LAG` | `300` | Event-loop lag (s) after which Babel exits so Docker restarts it; `0` disables |
 
-### Choosing a media server
+### Plex, Jellyfin, or both
 
-Babel reads audio tracks from Plex *or* Jellyfin — one per scan. With only one
-configured, that one is used. With both, `MEDIA_SERVER` decides (`auto`, the
-default, prefers Plex so existing installs keep their behaviour). With neither,
-Babel falls back to `ffprobe`, which needs the media mounted into the container.
+Plex and Jellyfin are configured independently — each has its own URL,
+credential and path prefix — and either one on its own is a complete setup.
+Configure both and Babel uses both: a lookup asks Plex first and falls back to
+Jellyfin, so a file only one of them has indexed is still classified, and
+collections (Dubbed Anime, Sub-Only Anime, …) are kept in sync on both.
+
+`MEDIA_SERVER` only narrows that: `auto` (the default) uses every configured
+server, `plex` or `jellyfin` restricts a scan to that one even when both are
+set up, and `none` turns both off and leaves detection to `ffprobe`. If one
+server is down when a scan starts, Babel logs it and carries on with the other.
 
 For Jellyfin, create an API key under **Dashboard → API Keys** and set
-`JELLYFIN_URL` / `JELLYFIN_API_KEY`. Collections (Dubbed Anime, Sub-Only Anime,
-…) are managed on Jellyfin the same way they are on Plex. If Jellyfin sees your
-files at a different path than Sonarr does, set `JELLYFIN_PATH_PREFIX` — it
-falls back to `PLEX_PATH_PREFIX`, then `LOCAL_PATH_PREFIX`.
+`JELLYFIN_URL` / `JELLYFIN_API_KEY`. If Jellyfin sees your files at a different
+path than Sonarr does, set `JELLYFIN_PATH_PREFIX` — it falls back to
+`PLEX_PATH_PREFIX`, then `LOCAL_PATH_PREFIX`.
 
 ### Keeping Sonarr monitoring in step with dubs
 
 A show written off as sub-only is often left unmonitored in Sonarr, so when a
-dub finally lands nothing goes looking for it. Turn on **Settings → Automation
-→ Monitor episodes in Sonarr when a dub is available** (`AUTO_MONITOR_DUBS`)
-and Babel sets those episodes back to monitored:
+dub finally lands nothing goes looking for it. Babel keeps monitoring in step
+(**Settings → Automation → Monitor episodes in Sonarr when a dub is
+available**, `AUTO_MONITOR_DUBS`, on by default):
 
-- when it triggers a dub search for a sub-only episode, and
-- when the daily MyAnimeList lookup reports a dub for a series it had not
-  been expecting one for.
+- when it triggers a dub search for a sub-only episode, that episode is set to
+  monitored first, so Sonarr keeps looking on its own schedule instead of
+  getting the single search Babel asked for, and
+- when the daily MyAnimeList lookup reports a dub for a series it had not been
+  expecting one for, that series' sub-only episodes are monitored.
 
-Babel only ever *adds* monitoring, and only for sub-only episodes of series it
-tracks; it never unmonitors anything. It is off by default because monitoring
-changes what Sonarr grabs on its own schedule.
+Babel only ever *adds* monitoring, only to sub-only episodes of series it
+tracks, and never unmonitors anything. Turn it off if you keep episodes
+deliberately unmonitored and don't want Babel touching that.
 
 ### Nothing showing up?
 
@@ -162,6 +169,13 @@ matches only series whose Sonarr **series type** is "anime". If your shows are
 type "standard", set the Anime Filter to `all` or `tag:YourTag`, or change the
 series type in Sonarr. A scan that matches nothing now records that reason in
 its History entry instead of quietly reporting zero.
+
+`all` means Babel reads the audio tracks of every series in Sonarr — it does
+not download anything by itself. Searches are only triggered for episodes that
+turn out to be sub-only, so an already-English library adds scan time and
+nothing else. It is worth knowing that a genuinely foreign-language show
+caught by `all` *would* get dub searches; `tag:YourTag` is the precise option
+if that matters to you.
 
 ### Unresponsive media mounts
 
@@ -243,17 +257,18 @@ Scan Cycle:
   │
   For each episode:
     ├── Check DB cache — unchanged files skip straight to their known status
-    ├── Otherwise check audio tracks (Plex/Jellyfin → ffprobe fallback; the
-    │   media server's library index is only built the first time a scan
-    │   actually needs it, so a cycle where nothing changed never touches it)
+    ├── Otherwise check audio tracks (Plex → Jellyfin → ffprobe, using
+    │   whichever servers are configured; each library index is only built
+    │   the first time a scan actually needs it, so a cycle where nothing
+    │   changed never touches them)
     ├── Classify: DUBBED / SUB_ONLY / MISSING
     └── If SUB_ONLY → trigger Sonarr search
   │
   Post-scan:
     ├── Check download queue status
     ├── Resolve stuck imports
-    ├── Sync Sonarr tags + media server collections
-    ├── Monitor dub-expected episodes in Sonarr (optional)
+    ├── Sync Sonarr tags + media server collections (Plex and/or Jellyfin)
+    ├── Monitor dub-expected episodes in Sonarr
     └── Send Discord notifications
 
 Webhook (real-time):

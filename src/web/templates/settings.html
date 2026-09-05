@@ -121,12 +121,12 @@
                 <div style="font-size:0.78rem;font-weight:600;color:var(--text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.3px;">Media Server</div>
                 <select name="MEDIA_SERVER" class="form-control" style="font-size:0.82rem;padding:0.35rem 0.6rem;">
                     {% set ms = settings.MEDIA_SERVER or 'auto' %}
-                    <option value="auto" {% if ms == 'auto' %}selected{% endif %}>Auto — use whichever is configured (Plex first)</option>
-                    <option value="plex" {% if ms == 'plex' %}selected{% endif %}>Plex</option>
-                    <option value="jellyfin" {% if ms == 'jellyfin' %}selected{% endif %}>Jellyfin</option>
+                    <option value="auto" {% if ms == 'auto' %}selected{% endif %}>Auto — use every configured server</option>
+                    <option value="plex" {% if ms == 'plex' %}selected{% endif %}>Plex only</option>
+                    <option value="jellyfin" {% if ms == 'jellyfin' %}selected{% endif %}>Jellyfin only</option>
                     <option value="none" {% if ms == 'none' %}selected{% endif %}>None — ffprobe only</option>
                 </select>
-                <div class="helper-text">Which server supplies audio track data. Only one is used per scan.</div>
+                <div class="helper-text">Configure either or both above. With both, a lookup tries Plex first and falls back to Jellyfin; pick one here to restrict a scan to it.</div>
             </div>
             <!-- Discord -->
             <div style="margin-bottom:0.75rem;">
@@ -219,7 +219,7 @@
                 <label class="toggle-row"><input type="checkbox" name="SHOW_THUMBNAILS" value="true" {% if settings.SHOW_THUMBNAILS != 'false' %}checked{% endif %}>Show poster thumbnails</label>
                 <label class="toggle-row"><input type="checkbox" name="AUTO_TAG_SONARR" value="true" {% if settings.AUTO_TAG_SONARR != 'false' %}checked{% endif %}>Auto-tag Sonarr series (babel:dubbed/sub-only)</label>
                 <label class="toggle-row"><input type="checkbox" name="AUTO_COLLECTIONS_PLEX" value="true" {% if settings.AUTO_COLLECTIONS_PLEX != 'false' %}checked{% endif %}>Auto-manage media server collections (Plex/Jellyfin)</label>
-                <label class="toggle-row"><input type="checkbox" name="AUTO_MONITOR_DUBS" value="true" {% if settings.AUTO_MONITOR_DUBS == 'true' %}checked{% endif %}>Monitor episodes in Sonarr when a dub is available</label>
+                <label class="toggle-row"><input type="checkbox" name="AUTO_MONITOR_DUBS" value="true" {% if settings.AUTO_MONITOR_DUBS != 'false' %}checked{% endif %}>Monitor episodes in Sonarr when a dub is available</label>
                 <label class="toggle-row"><input type="checkbox" name="AUTO_RESOLVE_IMPORTS" value="true" {% if settings.AUTO_RESOLVE_IMPORTS != 'false' %}checked{% endif %}>Auto-resolve stuck Sonarr imports</label>
                 <label class="toggle-row"><input type="checkbox" name="STUCK_IMPORT_DRY_RUN" value="true" {% if settings.STUCK_IMPORT_DRY_RUN == 'true' %}checked{% endif %}>Dry-run stuck import resolution (log only, no queue changes)</label>
             </div>
@@ -343,9 +343,10 @@ async function discoverPlex() {
             const ign = lib.ignored;
             const col = ign ? 'var(--red)' : 'var(--green)';
             const bs = ign ? 'background:rgba(45,212,191,0.12);color:var(--green);border:1px solid rgba(45,212,191,0.3);' : 'background:rgba(244,63,94,0.12);color:var(--red);border:1px solid rgba(244,63,94,0.3);';
-            const act = ign ? 'removeIgnoreByPattern(\'' + lib.path.replace(/'/g,"\\'") + '\')' : 'addIgnore(\'' + lib.path.replace(/'/g,"\\'") + '\',\'Plex: ' + lib.title.replace(/'/g,"\\'") + '\')';
+            const srv = lib.server || 'Media';
+            const act = ign ? 'removeIgnoreByPattern(\'' + lib.path.replace(/'/g,"\\'") + '\')' : 'addIgnore(\'' + lib.path.replace(/'/g,"\\'") + '\',\'' + srv + ': ' + lib.title.replace(/'/g,"\\'") + '\')';
             html += '<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.5rem;border:1px solid var(--border-color);border-radius:6px;margin-bottom:0.3rem;">'
-                + '<div style="flex:1;min-width:0;"><div style="font-weight:500;font-size:0.82rem;">' + lib.title + '</div><div style="font-size:0.7rem;color:var(--text-muted);font-family:\'JetBrains Mono\',monospace;">' + lib.path + ' (' + (lib.count||0) + ')</div></div>'
+                + '<div style="flex:1;min-width:0;"><div style="font-weight:500;font-size:0.82rem;">' + lib.title + ' <span style="font-size:0.65rem;color:var(--text-muted);font-weight:400;">' + srv + '</span></div><div style="font-size:0.7rem;color:var(--text-muted);font-family:\'JetBrains Mono\',monospace;">' + lib.path + ' (' + (lib.count||0) + ')</div></div>'
                 + '<span style="font-size:0.65rem;font-weight:600;color:' + col + ';text-transform:uppercase;">' + (ign?'IGNORED':'ON') + '</span>'
                 + '<button type="button" class="btn btn-sm" style="' + bs + 'padding:0.2rem 0.5rem;font-size:0.7rem;" onclick="' + act + '">' + (ign?'Enable':'Ignore') + '</button></div>';
         }

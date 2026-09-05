@@ -42,10 +42,11 @@ class Settings(BaseSettings):
     DISCORD_WEBHOOK_URL: str = ""
     AUTO_COLLECTIONS_PLEX: str = "true"
     AUTO_RESOLVE_IMPORTS: str = "true"
-    # Off by default: monitoring an episode changes what Sonarr grabs on its
-    # own schedule, which is a bigger change to someone's library than Babel's
-    # other automations make.
-    AUTO_MONITOR_DUBS: str = "false"
+    # On by default, like Babel's other automations. It only ever *adds*
+    # monitoring, and only to sub-only episodes of series Babel is already
+    # searching for a dub — the same episodes it asks Sonarr to search. Turn
+    # it off if you keep episodes deliberately unmonitored.
+    AUTO_MONITOR_DUBS: str = "true"
     STUCK_IMPORT_DRY_RUN: str = "false"
 
     # --- ffprobe / hung-mount hardening -------------------------------------

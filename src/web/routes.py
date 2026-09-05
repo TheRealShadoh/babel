@@ -818,22 +818,22 @@ def _render_ignore_list(paths: list[dict]) -> HTMLResponse:
 
 @router.get("/api/discover/plex")
 async def discover_plex(request: Request):
-    """Return the configured media server's libraries as JSON for the settings UI.
+    """Return every configured media server's libraries for the settings UI.
 
     Still served from the historical /api/discover/plex path so existing
-    bookmarks and the settings page keep working, but it now reports whichever
-    of Plex/Jellyfin is in use.
+    bookmarks and the settings page keep working, but each library now carries
+    the server it came from, since Plex and Jellyfin can both be in use.
     """
-    from src.scanner.media_server import create_media_client, server_label
+    from src.scanner.media_server import create_media_group
 
     cfg = await get_effective_settings()
-    client, kind = create_media_client(cfg)
-    if client is None:
+    group = create_media_group(cfg)
+    if group is None:
         return JSONResponse({"error": "No media server configured"}, status_code=400)
 
-    label = server_label(kind)
+    label = group.label
     try:
-        libraries = await client.get_libraries()
+        libraries = await group.get_libraries()
     except Exception as e:
         logger.exception("Failed to discover %s libraries: %s", label, e)
         return JSONResponse(
@@ -841,7 +841,7 @@ async def discover_plex(request: Request):
             status_code=500,
         )
     finally:
-        await client.close()
+        await group.close()
 
     # Check which ones are currently ignored
     settings = get_settings()

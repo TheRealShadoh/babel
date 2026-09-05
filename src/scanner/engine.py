@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.config import get_settings, get_effective_settings, normalize_language, translate_path, cfg_bool
 from src.scanner.sonarr import SonarrClient
-from src.scanner.media_server import create_media_client, server_label
+from src.scanner.media_server import client_label, create_media_group
 from src.scanner import ffprobe
 from src.db.database import get_db
 from src.db import models
@@ -421,12 +421,16 @@ async def _execute_scan() -> dict:
                 sonarr = None
 
         global _plex_client_ref
-        media, media_kind = create_media_client(cfg)
+        media = create_media_group(cfg)
         if media is not None:
             _plex_client_ref = media
             media_ok, media_msg = await media.test_connection()
-            if not media_ok:
-                logger.warning("%s unreachable: %s", server_label(media_kind), media_msg)
+            if media_ok:
+                logger.info("Media server(s): %s", media_msg)
+            else:
+                # test_connection already dropped the unreachable members, so
+                # reaching here means every configured server is down.
+                logger.warning("No media server reachable: %s", media_msg)
                 await media.close()
                 media = None
                 _plex_client_ref = None
@@ -451,7 +455,7 @@ async def _execute_scan() -> dict:
                 )
             else:
                 return await _scan_media_server_only(
-                    db, cfg, plex, target_lang, scan_id, media_kind,
+                    db, cfg, plex, target_lang, scan_id,
                 )
         finally:
             if sonarr:
@@ -495,7 +499,7 @@ async def _ensure_plex_index(plex, ignore_patterns: list[str]) -> None:
     """
     if plex is None or plex.is_indexed():
         return
-    label = server_label(getattr(plex, "path_target", "plex"))
+    label = client_label(plex)
     logger.info("Building %s audio track index (this may take a minute)...", label)
     _scan_progress.update(phase="indexing_plex", last_log=f"Building {label} audio track index...")
     plex_count = await plex.build_index(ignored_patterns=ignore_patterns)
@@ -506,9 +510,9 @@ async def _ensure_plex_index(plex, ignore_patterns: list[str]) -> None:
         logger.info("Sample %s paths: %s", label, samples)
 
 
-async def _scan_media_server_only(db, cfg, plex, target_lang, scan_id, media_kind="plex") -> dict:
-    """Scan using the media server as the sole data source (no Sonarr)."""
-    label = server_label(media_kind)
+async def _scan_media_server_only(db, cfg, plex, target_lang, scan_id) -> dict:
+    """Scan using the media server(s) as the sole data source (no Sonarr)."""
+    label = client_label(plex)
     logger.info("=" * 60)
     logger.info("SCAN STARTED — %s-only mode (Sonarr unavailable)", label)
     logger.info("Target language: %s", target_lang)
@@ -680,7 +684,7 @@ async def _scan_media_server_only(db, cfg, plex, target_lang, scan_id, media_kin
 
     return {
         "status": "completed",
-        "mode": f"{media_kind}_only",
+        "mode": "+".join(getattr(plex, "kinds", ["plex"])) + "_only",
         "episodes_checked": episodes_checked,
         "searches_triggered": 0,
         "dubbed": dubbed_found,
@@ -688,6 +692,25 @@ async def _scan_media_server_only(db, cfg, plex, target_lang, scan_id, media_kin
         "undetermined": undetermined,
         "errors": 0,
     }
+
+
+async def _media_audio_tracks(media, file_path: str, cfg: dict) -> list[dict] | None:
+    """Look up one file's audio tracks on the media server(s).
+
+    A MediaServerGroup translates the Sonarr path per member and tags each
+    track with the server it came from — its path_target is None to say so.
+    A bare client still needs both done for it.
+    """
+    target = getattr(media, "path_target", "plex")
+    if target is None:
+        return await media.get_audio_tracks(file_path)
+
+    tracks = await media.get_audio_tracks(translate_path(file_path, target, cfg))
+    if tracks is not None:
+        for track in tracks:
+            track["language"] = normalize_language(track["language"])
+            track["source"] = target
+    return tracks
 
 
 async def _classify_episode_audio(
@@ -708,14 +731,9 @@ async def _classify_episode_audio(
         # File changed — the previous audio_tracks row no longer applies.
         if plex:
             await _ensure_plex_index(plex, ignore_patterns)
-            plex_path = translate_path(file_path, getattr(plex, "path_target", "plex"), cfg)
-            tracks = await plex.get_audio_tracks(plex_path)
+            tracks = await _media_audio_tracks(plex, file_path, cfg)
             if tracks is not None:
                 stats.plex_fresh_lookups += 1
-                source = getattr(plex, "path_target", "plex")
-                for t in tracks:
-                    t["language"] = normalize_language(t["language"])
-                    t["source"] = source
         if tracks is None:
             local_path = translate_path(file_path, "local", cfg)
             tracks = await ffprobe.get_audio_tracks(local_path)
@@ -736,14 +754,9 @@ async def _classify_episode_audio(
 
         if tracks is None and plex:
             await _ensure_plex_index(plex, ignore_patterns)
-            plex_path = translate_path(file_path, getattr(plex, "path_target", "plex"), cfg)
-            tracks = await plex.get_audio_tracks(plex_path)
+            tracks = await _media_audio_tracks(plex, file_path, cfg)
             if tracks is not None:
                 stats.plex_fresh_lookups += 1
-                source = getattr(plex, "path_target", "plex")
-                for t in tracks:
-                    t["language"] = normalize_language(t["language"])
-                    t["source"] = source
 
         if tracks is None:
             local_path = translate_path(file_path, "local", cfg)
@@ -970,9 +983,9 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
     if not plex:
         logger.info("No media server available — will use ffprobe only")
 
-    auto_monitor = cfg_bool(cfg.get("AUTO_MONITOR_DUBS"), default=False)
-    if auto_monitor:
-        logger.info("Auto-monitor is on — episodes Babel searches will be monitored in Sonarr")
+    auto_monitor = cfg_bool(cfg.get("AUTO_MONITOR_DUBS"))
+    if not auto_monitor:
+        logger.info("Auto-monitor is off — Sonarr monitor status will be left alone")
 
     sonarr_series_ids = set()
 
@@ -1224,8 +1237,7 @@ async def _scan_with_sonarr(db, cfg, sonarr, plex, rate_limiter, cooldown, targe
             if not coll_result.get("skipped"):
                 logger.info(
                     "%s collections synced: %d shows updated",
-                    server_label(getattr(plex, "path_target", "plex")),
-                    coll_result["collections_updated"],
+                    client_label(plex), coll_result["collections_updated"],
                 )
         except Exception:
             logger.warning("Media server collection sync failed", exc_info=True)

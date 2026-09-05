@@ -9,7 +9,7 @@ Babel monitors your media library via **Sonarr** and **Plex** or **Jellyfin**, d
 - **Upgrade Tracking** — Monitors if Sonarr downloads are actually dubbed, auto-retries failed upgrades
 - **Dub Intelligence** — Queries MyAnimeList to check if English dubs even exist before searching
 - **Sonarr Auto-Tagging** — Tags series as `babel:dubbed`, `babel:partial-dub`, `babel:sub-only`
-- **Collections** — Auto-creates "Dubbed Anime", "Sub-Only Anime" collections in Plex or Jellyfin
+- **Collections** — Auto-creates "Dubbed Anime", "Sub-Only Anime" collections in Plex and/or Jellyfin
 - **Stuck Import Resolution** — Detects and force-imports stuck Sonarr downloads
 - **Discord Notifications** — Webhook alerts when dubs are found
 - **Beautiful Dashboard** — Dark-themed web UI with poster art, progress tracking, and live scan status
@@ -50,12 +50,12 @@ All settings can be configured via environment variables or the web UI (Settings
 | `PLEX_TOKEN` | — | Plex authentication token |
 | `JELLYFIN_URL` | — | Jellyfin server URL (alternative to Plex) |
 | `JELLYFIN_API_KEY` | — | Jellyfin API key (Dashboard > API Keys) |
-| `MEDIA_SERVER` | `auto` | Which server supplies audio data: `auto`, `plex`, `jellyfin`, `none` |
+| `MEDIA_SERVER` | `auto` | `auto` uses every configured server; `plex`/`jellyfin` restrict to one; `none` disables both |
 | `SCAN_INTERVAL_HOURS` | `6` | Hours between automatic scans |
 | `TARGET_LANGUAGE` | `eng` | ISO 639-2 language code |
 | `SEARCH_COOLDOWN_DAYS` | `7` | Days between re-searching the same episode |
 | `ANIME_FILTER` | `type` | Which Sonarr series to scan: `type`, `all`, or `tag:YourTag` |
-| `AUTO_MONITOR_DUBS` | `false` | Monitor episodes in Sonarr once a dub is available |
+| `AUTO_MONITOR_DUBS` | `true` | Monitor episodes in Sonarr once a dub is available |
 | `DISCORD_WEBHOOK_URL` | — | Discord webhook for notifications |
 
 ## Unraid
