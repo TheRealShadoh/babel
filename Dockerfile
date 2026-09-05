@@ -16,6 +16,10 @@ ARG BABEL_BUILD=source
 ENV BABEL_BUILD=${BABEL_BUILD}
 
 COPY src/ ./src/
+# Operator tools the README tells people to run inside the container
+# (scripts/check_dub_lookup.py, scripts/repro_hung_mount.py). Without this the
+# documented `docker exec babel python scripts/...` fails on a missing file.
+COPY scripts/ ./scripts/
 COPY entrypoint.sh /entrypoint.sh
 RUN mkdir -p /app/data && chmod +x /entrypoint.sh && chown -R babel:babel /app
 
