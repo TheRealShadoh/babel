@@ -405,8 +405,14 @@ _PURGE_FLOOR_ROWS = 10
 _PURGE_FLOOR_FRACTION = 0.5
 
 
-async def delete_series_not_in(db: aiosqlite.Connection, keep_ids: set[int]) -> int:
+async def delete_series_not_in(
+    db: aiosqlite.Connection, keep_ids: set[int], only_negative_ids: bool = False
+) -> int:
     """Delete series whose IDs are not in *keep_ids* (orphan cleanup).
+
+    *only_negative_ids* restricts both the candidates and the floor to
+    media-server-keyed rows (negative IDs). Media-server-only scans pass it so
+    they can never prune a Sonarr-keyed library they did not enumerate.
 
     An empty *keep_ids* is treated as a failed upstream enumeration and is
     refused: the caller could not have learned that the library is genuinely
@@ -424,16 +430,18 @@ async def delete_series_not_in(db: aiosqlite.Connection, keep_ids: set[int]) -> 
         )
         return 0
 
-    async with db.execute("SELECT COUNT(*) AS c FROM series") as cur:
+    scope = "WHERE id < 0" if only_negative_ids else ""
+    async with db.execute(f"SELECT COUNT(*) AS c FROM series {scope}") as cur:
         row = await cur.fetchone()
     existing = (row["c"] if row else 0) or 0
 
     keep = list(keep_ids)
     doomed: set[int] = set()
+    scope_and = "AND id < 0" if only_negative_ids else ""
     for chunk in _chunks(keep):
         placeholders = ",".join("?" for _ in chunk)
         async with db.execute(
-            f"SELECT id FROM series WHERE id NOT IN ({placeholders})", tuple(chunk)
+            f"SELECT id FROM series WHERE id NOT IN ({placeholders}) {scope_and}", tuple(chunk)
         ) as cur:
             rows = await cur.fetchall()
         candidates = {r["id"] for r in rows}
@@ -600,6 +608,15 @@ async def delete_episodes_not_in(
 # ---------------------------------------------------------------------------
 # Audio tracks
 # ---------------------------------------------------------------------------
+
+
+async def delete_audio_tracks(
+    db: aiosqlite.Connection, episode_id: int, commit: bool = True
+) -> None:
+    """Forget an episode's cached audio tracks (its file changed)."""
+    await db.execute("DELETE FROM audio_tracks WHERE episode_id = ?", (episode_id,))
+    if commit:
+        await db.commit()
 
 
 async def replace_audio_tracks(
@@ -1053,6 +1070,20 @@ async def get_recent_resolved_upgrades(db: aiosqlite.Connection, limit: int = 20
         (limit,),
     ) as cur:
         return _rows_to_dicts(await cur.fetchall())
+
+
+async def get_pending_upgrade_sizes(db: aiosqlite.Connection) -> dict[int, int | None]:
+    """episode_id -> file size recorded when its latest pending search was made.
+
+    Lets a scan notice that an upgrade has arrived even when the file change
+    was first seen on an earlier pass that could not read the new file.
+    """
+    async with db.execute(
+        """SELECT episode_id, old_file_size FROM upgrade_tracking
+           WHERE result = 'pending' ORDER BY triggered_at ASC, id ASC"""
+    ) as cur:
+        rows = await cur.fetchall()
+    return {r["episode_id"]: r["old_file_size"] for r in rows}
 
 
 async def get_pending_episode_ids(db: aiosqlite.Connection) -> set[int]:

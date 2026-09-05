@@ -14,3 +14,22 @@ os.environ.setdefault("DB_PATH", _ENV_DB_PATH)
 # than the connection passed into the function under test, so this file
 # needs a real schema even though the tests themselves use per-test tmp DBs.
 asyncio.run(init_db(_ENV_DB_PATH))
+
+
+import pytest  # noqa: E402
+
+from src.config import get_settings, invalidate_effective_settings_cache  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_caches():
+    """Both settings caches are process-wide.
+
+    Without this the suite is order-dependent: a test that populates the
+    effective-settings cache poisons the next test for up to five seconds.
+    """
+    get_settings.cache_clear()
+    invalidate_effective_settings_cache()
+    yield
+    get_settings.cache_clear()
+    invalidate_effective_settings_cache()

@@ -746,6 +746,9 @@ async def save_settings(request: Request):
                         await models.set_setting(db, "AUTH_PASSWORD_HASH", hash_password(str(value)))
                     else:
                         await models.set_setting(db, key, str(value))
+            elif key == "SCAN_INTERVAL_HOURS" and value is not None:
+                from src.scheduler import clamp_interval_hours
+                await models.set_setting(db, key, str(clamp_interval_hours(value)))
             elif value is not None:
                 await models.set_setting(db, key, str(value))
     except Exception:
