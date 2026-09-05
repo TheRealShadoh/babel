@@ -528,6 +528,20 @@ async def get_episodes_for_series(
         return _rows_to_dicts(await cur.fetchall())
 
 
+async def get_episode_ids_by_status(
+    db: aiosqlite.Connection, series_id: int, statuses: tuple[str, ...]
+) -> list[int]:
+    """Episode IDs of one series in any of *statuses* (e.g. sub-only ones)."""
+    if not statuses:
+        return []
+    placeholders = ",".join("?" for _ in statuses)
+    async with db.execute(
+        f"SELECT id FROM episodes WHERE series_id = ? AND dub_status IN ({placeholders})",
+        (series_id, *statuses),
+    ) as cur:
+        return [r["id"] for r in await cur.fetchall()]
+
+
 async def delete_episodes_not_in(
     db: aiosqlite.Connection,
     series_id: int,

@@ -1,8 +1,17 @@
 """
-Dub availability lookup via Jikan API (MyAnimeList unofficial API).
+Dub availability lookup.
 
-Checks whether an anime has known English dub licensors, helping users
-know if a dub even exists before wasting searches.
+Two sources, asked in order of cost:
+
+1. Jikan (the unofficial MyAnimeList API) records a show's *licensors*. That
+   is an inference — a licensor may only ever distribute it subtitled — but
+   it is one request and covers most of the catalogue.
+2. Anime News Network lists the actual voice cast per language, so an English
+   cast is direct evidence that a dub exists. Consulted only where MAL is
+   inconclusive, because it costs two more requests per title.
+
+The distinction that matters throughout: "no dub is known" and "we could not
+find out" are different answers, and only the first one is ever recorded.
 """
 
 import asyncio
@@ -22,13 +31,26 @@ DEFAULT_DELAY = 2.0
 MAX_RETRIES = 3
 MAX_BACKOFF = 60.0
 
-# Companies known to produce English dubs
+# Companies known to produce or commission English dubs. Streaming platforms
+# belong here as much as the traditional licensors do: Netflix, Amazon and
+# Disney now commission more dubs than several of the classic names put
+# together, and leaving them out rated a Netflix original merely "likely".
 DUB_LICENSORS = {
     "funimation", "crunchyroll", "sentai filmworks", "aniplex of america",
     "viz media", "hidive", "discotek media", "adv films", "bang zoom!",
     "bandai entertainment", "nis america", "nozomi entertainment",
     "media play news", "geneon entertainment usa", "manga entertainment",
+    "netflix", "amazon prime video", "amazon", "disney platform distribution",
+    "disney+", "hulu", "muse communication", "medialink", "ani-one",
+    "anime limited", "right stuf", "eleven arts", "gkids", "shout! factory",
+    "toei animation", "pony canyon usa", "aniplex", "vsi group",
 }
+
+# A show that has not finished airing rarely has licensor data on MAL yet, and
+# a dub announcement typically follows the simulcast rather than preceding it.
+# Reporting those as "no dub known" put currently-airing shows on the No Dub
+# list; "unknown" keeps them in the recheck queue instead.
+_UNSETTLED_STATUSES = {"currently airing", "not yet aired"}
 
 
 async def lookup_dub_info(title: str, client: httpx.AsyncClient | None = None) -> dict:
@@ -99,11 +121,15 @@ async def lookup_dub_info(title: str, client: httpx.AsyncClient | None = None) -
         licensors = [lic.get("name", "") for lic in anime.get("licensors", [])]
         result["licensors"] = licensors
 
-        licensor_names = {lic.lower() for lic in licensors}
+        licensor_names = {lic.lower().strip() for lic in licensors}
         if licensor_names & DUB_LICENSORS:
             result["dub_status"] = "available"
         elif anime.get("licensors"):
             result["dub_status"] = "likely"
+        elif (result["status"] or "").lower() in _UNSETTLED_STATUSES:
+            # Airing or unaired with nothing recorded yet — not evidence of
+            # anything, so leave it open rather than calling it "no dub".
+            result["dub_status"] = "unknown"
         else:
             result["dub_status"] = "unlikely"
 
@@ -151,6 +177,68 @@ def _best_match(title: str, results: list[dict]) -> dict | None:
     return None
 
 
+# MAL verdicts that are worth a second opinion. "available"/"likely" already
+# answer the question; these two do not.
+_INCONCLUSIVE = {"unlikely", "unknown"}
+
+ANN_DELAY = 1.0  # ANN asks API users to stay around one request per second
+
+
+async def corroborate_with_ann(
+    results: dict, delay: float = ANN_DELAY, sleep=None, client=None,
+) -> int:
+    """Ask ANN about the titles MyAnimeList could not settle.
+
+    Mutates *results* in place: a show ANN lists an English cast for becomes
+    "available", and the evidence is written into its licensors so the UI can
+    say where the answer came from. Everything else is left exactly as MAL
+    reported it — ANN not knowing a show is not evidence against a dub.
+
+    Returns how many verdicts it changed.
+    """
+    sleep = sleep or asyncio.sleep
+    pending = [
+        (key, info) for key, info in results.items()
+        if info.get("ok") and info.get("dub_status") in _INCONCLUSIVE and info.get("source_title")
+    ]
+    if not pending:
+        return 0
+
+    from src.scanner.ann import find_english_dub
+
+    logger.info("Asking Anime News Network about %d unsettled titles", len(pending))
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(timeout=20, follow_redirects=True)
+
+    changed = 0
+    try:
+        for i, (_key, info) in enumerate(pending):
+            # ANN indexes by the show's own title, so ask with the title MAL
+            # matched rather than whatever the folder happens to be called.
+            ann = await find_english_dub(info["source_title"], client=client)
+            info["ann_checked"] = ann["ok"]
+            if ann["ok"] and ann["has_dub"]:
+                info["dub_status"] = "available"
+                info["ann_id"] = ann["ann_id"]
+                evidence = f"English dub cast on Anime News Network ({ann['cast_size']} roles)"
+                info["licensors"] = [*info.get("licensors", []), evidence]
+                changed += 1
+                logger.info(
+                    "ANN confirms an English dub for %r (id=%s)",
+                    ann["matched_title"], ann["ann_id"],
+                )
+            if i < len(pending) - 1:
+                await sleep(delay)
+    except Exception:
+        logger.warning("Anime News Network lookup failed; keeping MAL results", exc_info=True)
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    return changed
+
+
 async def bulk_lookup(
     items: list[tuple], delay: float = DEFAULT_DELAY, sleep=None
 ) -> dict:
@@ -190,13 +278,109 @@ async def bulk_lookup(
     return results
 
 
+async def monitor_newly_dubbed(db, cfg: dict, newly_available: list[dict]) -> int:
+    """Monitor the sub-only episodes of series that just got a dub.
+
+    A show Babel had written off as sub-only is often left unmonitored in
+    Sonarr, so when a dub is finally announced nothing goes looking for it.
+    Flipping those episodes back to monitored is what makes the announcement
+    actionable — Sonarr picks the dub up on its own once a release appears.
+
+    Returns the number of episodes monitored.
+    """
+    from src.config import cfg_bool
+    from src.db import models
+
+    if not cfg_bool(cfg.get("AUTO_MONITOR_DUBS")):
+        return 0
+    if not cfg.get("SONARR_URL") or not cfg.get("SONARR_API_KEY"):
+        return 0
+
+    # Negative IDs are media-server-only series that Sonarr knows nothing about.
+    series_ids = [s["id"] for s in newly_available if s.get("id", 0) > 0]
+    if not series_ids:
+        return 0
+
+    episode_ids: list[int] = []
+    for series_id in series_ids:
+        episode_ids.extend(
+            await models.get_episode_ids_by_status(db, series_id, ("SUB_ONLY",))
+        )
+    if not episode_ids:
+        return 0
+
+    from src.scanner.sonarr import SonarrClient
+
+    sonarr = SonarrClient(cfg["SONARR_URL"], cfg["SONARR_API_KEY"])
+    try:
+        ok = await sonarr.set_episodes_monitored(episode_ids, True)
+    except Exception:
+        logger.warning("Failed to monitor newly dubbed episodes", exc_info=True)
+        return 0
+    finally:
+        await sonarr.close()
+
+    if not ok:
+        return 0
+    logger.info(
+        "Monitored %d sub-only episodes across %d newly dubbed series",
+        len(episode_ids), len(series_ids),
+    )
+    return len(episode_ids)
+
+
+async def self_test(title: str = "Cowboy Bebop") -> dict:
+    """Run one real lookup end to end and report what each source said.
+
+    This is the answer to "is dub detection actually working?": it exercises
+    the same code a scheduled run uses, against the live services, and returns
+    what came back rather than a pass/fail guess.
+    """
+    from src.config import cfg_bool, get_effective_settings
+
+    cfg = await get_effective_settings()
+    report: dict = {
+        "title": title,
+        "mal": {"ok": False, "reachable": False, "rate_limited": False,
+                "matched": None, "dub_status": "unknown", "licensors": []},
+        "ann": {"enabled": cfg_bool(cfg.get("DUB_LOOKUP_ANN")), "ok": False,
+                "has_dub": False, "matched": None, "cast_size": 0},
+        "verdict": "unknown",
+    }
+
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        info = await lookup_dub_info(title, client=client)
+        report["mal"].update(
+            ok=info["ok"],
+            reachable=info["ok"] or info.get("rate_limited", False),
+            rate_limited=info.get("rate_limited", False),
+            matched=info.get("source_title"),
+            dub_status=info["dub_status"],
+            licensors=info.get("licensors", []),
+        )
+        report["verdict"] = info["dub_status"]
+
+        if report["ann"]["enabled"]:
+            from src.scanner.ann import find_english_dub
+
+            ann = await find_english_dub(info.get("source_title") or title, client=client)
+            report["ann"].update(
+                ok=ann["ok"], has_dub=ann["has_dub"],
+                matched=ann["matched_title"], cast_size=ann["cast_size"],
+            )
+            if ann["ok"] and ann["has_dub"] and report["verdict"] in _INCONCLUSIVE:
+                report["verdict"] = "available"
+
+    return report
+
+
 async def run_dub_lookup(force: bool = False) -> dict:
     """Run dub availability lookup for series that need it.
 
     Records the run in scan_log for history tracking.
     Returns: {"checked": N, "available": N, "likely": N, "unlikely": N}
     """
-    from src.config import get_settings, get_effective_settings
+    from src.config import cfg_bool, get_settings, get_effective_settings
     from src.db.database import get_db
     from src.db import models
 
@@ -204,7 +388,7 @@ async def run_dub_lookup(force: bool = False) -> dict:
     cfg = await get_effective_settings()
     db = await get_db(settings.DB_PATH)
     summary = {"checked": 0, "available": 0, "likely": 0, "unlikely": 0,
-               "unreachable": 0}
+               "unknown": 0, "unreachable": 0, "ann_confirmed": 0, "monitored": 0}
 
     # Recorded in scan_log for history, but tagged so the Overview does not
     # mistake a dub lookup for the most recent media scan.
@@ -229,6 +413,9 @@ async def run_dub_lookup(force: bool = False) -> dict:
         logger.info("Dub lookup started: %d series to check", len(items))
         results = await bulk_lookup(items)
 
+        if cfg_bool(cfg.get("DUB_LOOKUP_ANN")):
+            summary["ann_confirmed"] = await corroborate_with_ann(results)
+
         newly_available = []
         for series_id, info in results.items():
             series = by_id.get(series_id)
@@ -244,6 +431,7 @@ async def run_dub_lookup(force: bool = False) -> dict:
                 # Detect transition to available/likely
                 if new_status in ("available", "likely") and old_status in (None, "unknown", "unlikely"):
                     newly_available.append({
+                        "id": series["id"],
                         "title": series["title"],
                         "licensors": ", ".join(info["licensors"]),
                         "poster_url": series.get("poster_url"),
@@ -255,6 +443,8 @@ async def run_dub_lookup(force: bool = False) -> dict:
                 )
 
         if newly_available:
+            summary["monitored"] = await monitor_newly_dubbed(db, cfg, newly_available)
+
             webhook_url = cfg.get("DISCORD_WEBHOOK_URL", "")
             if webhook_url:
                 from src.notifications import send_discord_embed
@@ -273,11 +463,16 @@ async def run_dub_lookup(force: bool = False) -> dict:
         summary["available"] = sum(1 for r in answered if r["dub_status"] == "available")
         summary["likely"] = sum(1 for r in answered if r["dub_status"] == "likely")
         summary["unlikely"] = sum(1 for r in answered if r["dub_status"] == "unlikely")
+        summary["unknown"] = sum(1 for r in answered if r["dub_status"] == "unknown")
 
         msg = (
             f"Dub lookup: {summary['checked']} checked, {summary['available']} available, "
             f"{summary['likely']} likely, {summary['unlikely']} unlikely"
         )
+        if summary["ann_confirmed"]:
+            msg += f", {summary['ann_confirmed']} confirmed by Anime News Network"
+        if summary["monitored"]:
+            msg += f", {summary['monitored']} episodes monitored in Sonarr"
         if summary["unreachable"]:
             msg += f", {summary['unreachable']} unreachable"
             logger.warning(

@@ -5,7 +5,7 @@
 <h1 align="center">Babel</h1>
 
 <p align="center">
-  <strong>Media Dub Detection & Upgrade Tool for Sonarr and Plex</strong>
+  <strong>Media Dub Detection & Upgrade Tool for Sonarr, Plex and Jellyfin</strong>
 </p>
 
 <p align="center">
@@ -39,13 +39,14 @@
 - Stuck import resolution — detects and force-imports stuck Sonarr queue items (including ID mismatches)
 
 **Intelligence**
-- Dub availability lookup via MyAnimeList/Jikan — knows if a dub even exists before searching
+- Dub availability lookup via MyAnimeList/Jikan and Anime News Network — knows if a dub even exists before searching
 - Dub status change notifications — alerts when a previously unlicensed show gets a dub
 - Auto-overrides MAL when actual dubbed audio is detected in files
 
 **Integrations**
-- Sonarr: custom format creation, tag syncing, webhook support for instant upgrade detection
+- Sonarr: custom format creation, tag syncing, monitor-status updates, webhook support for instant upgrade detection
 - Plex: audio indexing, collection management (Dubbed Anime, Sub-Only, etc.)
+- Jellyfin: the same audio indexing and collection management, as an alternative to Plex
 - Discord: webhook notifications for scan results and dub upgrades
 - Sonarr webhook endpoint for real-time import awareness
 
@@ -56,6 +57,7 @@
 - Dub Intelligence page with Recently Dubbed / Dub Expected / No Dub tabs
 - Scan history with drilldown detail views
 - Log viewer with level filtering
+- Diagnostics that explain why a scan found nothing (filter, connection, path mapping)
 - All settings configurable via web UI
 
 ## Quick Start
@@ -96,10 +98,16 @@ All settings can be configured via environment variables or the web UI Settings 
 | `SONARR_API_KEY` | | Sonarr API key (Settings > General) |
 | `PLEX_URL` | | Plex server URL |
 | `PLEX_TOKEN` | | Plex authentication token |
+| `JELLYFIN_URL` | | Jellyfin server URL (alternative to Plex) |
+| `JELLYFIN_API_KEY` | | Jellyfin API key (Dashboard > API Keys) |
+| `MEDIA_SERVER` | `auto` | `auto` uses every configured server; `plex`/`jellyfin` restrict a scan to one; `none` disables both |
 | `SCAN_INTERVAL_HOURS` | `6` | Hours between automatic scans |
 | `TARGET_LANGUAGE` | `eng` | ISO 639-2 language code to search for |
 | `SEARCH_COOLDOWN_DAYS` | `7` | Days before re-searching an episode |
 | `SEARCH_RATE_LIMIT` | `5` | Max Sonarr searches per minute |
+| `ANIME_FILTER` | `type` | Which Sonarr series to scan: `type` (series type "anime"), `all`, or `tag:YourTag` |
+| `AUTO_MONITOR_DUBS` | `true` | Monitor episodes in Sonarr when a dub is available, so Sonarr keeps looking on its own |
+| `DUB_LOOKUP_ANN` | `true` | Check Anime News Network when MyAnimeList cannot settle whether a dub exists |
 | `DISCORD_WEBHOOK_URL` | | Discord webhook for notifications |
 | `WEBHOOK_SECRET` | | If set, the Sonarr webhook requires `?apikey=` (or `X-Api-Key` header) to match |
 | `AUTH_USERNAME` / `AUTH_PASSWORD` | | If both are set, the whole dashboard requires HTTP Basic Auth. Overrides anything set in Settings → Access |
@@ -111,6 +119,103 @@ All settings can be configured via environment variables or the web UI Settings 
 | `FFPROBE_SLOT_TIMEOUT` | `15` | Seconds to wait for a free probe slot before skipping the file |
 | `WATCHDOG_UNHEALTHY_LAG` | `15` | Event-loop lag (s) above which `/api/health` returns 503 |
 | `WATCHDOG_ABORT_LAG` | `300` | Event-loop lag (s) after which Babel exits so Docker restarts it; `0` disables |
+
+### Plex, Jellyfin, or both
+
+Plex and Jellyfin are configured independently — each has its own URL,
+credential and path prefix — and either one on its own is a complete setup.
+Configure both and Babel uses both: a lookup asks Plex first and falls back to
+Jellyfin, so a file only one of them has indexed is still classified, and
+collections (Dubbed Anime, Sub-Only Anime, …) are kept in sync on both.
+
+`MEDIA_SERVER` only narrows that: `auto` (the default) uses every configured
+server, `plex` or `jellyfin` restricts a scan to that one even when both are
+set up, and `none` turns both off and leaves detection to `ffprobe`. If one
+server is down when a scan starts, Babel logs it and carries on with the other.
+
+For Jellyfin, create an API key under **Dashboard → API Keys** and set
+`JELLYFIN_URL` / `JELLYFIN_API_KEY`. If Jellyfin sees your files at a different
+path than Sonarr does, set `JELLYFIN_PATH_PREFIX` — it falls back to
+`PLEX_PATH_PREFIX`, then `LOCAL_PATH_PREFIX`.
+
+### Keeping Sonarr monitoring in step with dubs
+
+A show written off as sub-only is often left unmonitored in Sonarr, so when a
+dub finally lands nothing goes looking for it. Babel keeps monitoring in step
+(**Settings → Automation → Monitor episodes in Sonarr when a dub is
+available**, `AUTO_MONITOR_DUBS`, on by default):
+
+- when it triggers a dub search for a sub-only episode, that episode is set to
+  monitored first, so Sonarr keeps looking on its own schedule instead of
+  getting the single search Babel asked for, and
+- when the daily MyAnimeList lookup reports a dub for a series it had not been
+  expecting one for, that series' sub-only episodes are monitored.
+
+Babel only ever *adds* monitoring, only to sub-only episodes of series it
+tracks, and never unmonitors anything. Turn it off if you keep episodes
+deliberately unmonitored and don't want Babel touching that.
+
+### How dub availability is decided
+
+Two sources, asked in order of cost:
+
+1. **MyAnimeList** (via the Jikan API) records a show's *licensors*. That is an
+   inference — a licensor may only ever distribute a show subtitled — but it is
+   one request and covers most of the catalogue. A recognised dub licensor
+   (Funimation, Crunchyroll, Sentai, HIDIVE, Netflix, Amazon, Muse, …) reads as
+   **available**; some other licensor reads as **likely**; nothing recorded on a
+   finished show reads as **unlikely**. A show still airing usually has no
+   licensor recorded yet, so it stays **unknown** and is re-checked, rather than
+   being written off as having no dub.
+2. **Anime News Network** lists the actual voice cast per language, so an
+   English cast is direct evidence a dub was produced. Babel asks ANN only about
+   the titles MyAnimeList could not settle (`DUB_LOOKUP_ANN`, on by default),
+   because each one costs two more requests at ANN's ~1/second guidance. ANN
+   only answers on an exact title match — crediting one show's dub to its
+   sequel would be worse than no answer — and if ANN is unreachable or has no
+   entry, MyAnimeList's verdict stands.
+
+Neither source can be reached from a container with no outbound HTTPS, and the
+symptom is silence: the Dub Intelligence page just stays empty. To check from
+the machine actually running Babel:
+
+```bash
+docker exec babel python scripts/check_dub_lookup.py
+```
+
+With no arguments it checks a few shows whose dubs are beyond dispute, prints
+what each source said, and exits non-zero if the services are unreachable (or
+if a known-dubbed show does not come back "available"). Pass titles of your own,
+or `--from-library 10` to check shows from your library. **Run Diagnostics** on
+the Settings page does the same thing as a single canary lookup.
+
+Dub availability is advisory: it drives the Dub Intelligence page, the badges on
+each series, and (with `AUTO_MONITOR_DUBS` on) monitoring when a dub is newly
+announced. It never blocks a search — a sub-only episode is searched for on the
+normal cooldown whatever MyAnimeList thinks.
+
+### Nothing showing up?
+
+If Sonarr and Plex/Jellyfin both connect but the dashboard stays empty, click
+**Run Diagnostics** on the Settings page (or `GET /api/diagnostics`). It checks,
+in order, each connection, how many Sonarr series match the Anime Filter (with
+a breakdown of the series types Sonarr actually has), whether those series have
+downloaded files, the media server's libraries, whether Sonarr's paths resolve
+to something that exists inside the container, active ignore rules, and what
+the last scan did.
+
+The most common cause is the filter: `ANIME_FILTER` defaults to `type`, which
+matches only series whose Sonarr **series type** is "anime". If your shows are
+type "standard", set the Anime Filter to `all` or `tag:YourTag`, or change the
+series type in Sonarr. A scan that matches nothing now records that reason in
+its History entry instead of quietly reporting zero.
+
+`all` means Babel reads the audio tracks of every series in Sonarr — it does
+not download anything by itself. Searches are only triggered for episodes that
+turn out to be sub-only, so an already-English library adds scan time and
+nothing else. It is worth knowing that a genuinely foreign-language show
+caught by `all` *would* get dub searches; `tag:YourTag` is the precise option
+if that matters to you.
 
 ### Unresponsive media mounts
 
@@ -192,23 +297,25 @@ Scan Cycle:
   │
   For each episode:
     ├── Check DB cache — unchanged files skip straight to their known status
-    ├── Otherwise check audio tracks (Plex → ffprobe fallback; Plex's
-    │   library index is only built the first time a scan actually needs
-    │   it, so a cycle where nothing changed never touches Plex at all)
+    ├── Otherwise check audio tracks (Plex → Jellyfin → ffprobe, using
+    │   whichever servers are configured; each library index is only built
+    │   the first time a scan actually needs it, so a cycle where nothing
+    │   changed never touches them)
     ├── Classify: DUBBED / SUB_ONLY / MISSING
     └── If SUB_ONLY → trigger Sonarr search
   │
   Post-scan:
     ├── Check download queue status
     ├── Resolve stuck imports
-    ├── Sync Sonarr tags + Plex collections
+    ├── Sync Sonarr tags + media server collections (Plex and/or Jellyfin)
+    ├── Monitor dub-expected episodes in Sonarr
     └── Send Discord notifications
 
 Webhook (real-time):
   Sonarr import event → re-check audio via ffprobe → resolve upgrade
 
-Note: Sonarr is optional — with only Plex configured, Babel runs in a
-read-only "Plex-only" mode (detection and collections, no searches).
+Note: Sonarr is optional — with only a media server configured, Babel runs in
+a read-only mode (detection and collections, no searches).
 ```
 
 ## API
@@ -222,8 +329,9 @@ read-only "Plex-only" mode (detection and collections, no searches).
 | `POST /api/webhook/sonarr` | Sonarr webhook receiver (`?apikey=` if `WEBHOOK_SECRET` is set) |
 | `POST /api/check-downloads` | Check pending upgrade status |
 | `POST /api/resolve-imports` | Fix stuck Sonarr imports |
-| `POST /api/lookup-dubs` | Run MAL dub availability check |
+| `POST /api/lookup-dubs` | Run the dub availability check (MyAnimeList, then ANN where needed) |
 | `POST /api/setup-sonarr-dub` | Create/assign a Sonarr custom format that prefers dual-audio releases |
+| `GET /api/diagnostics` | Why a scan is finding nothing: connections, filter match, paths, ignores |
 
 ## Data & Backups
 

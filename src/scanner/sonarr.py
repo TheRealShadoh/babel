@@ -110,37 +110,83 @@ class SonarrClient:
 
         return counts
 
-    async def get_anime_series(self, filter_mode: str = "type") -> list[dict] | None:
-        """Return the filtered series list, or None if Sonarr could not be read."""
+    async def get_all_series(self) -> list[dict] | None:
+        """Return every series Sonarr knows about, or None if it could not be read."""
         try:
             resp = await self.client.get("/series")
             resp.raise_for_status()
-            all_series = resp.json()
+            return resp.json()
         except httpx.HTTPError as e:
             logger.error("Failed to fetch series: %s", e)
             return None
 
+    async def get_anime_series(self, filter_mode: str = "type") -> list[dict] | None:
+        """Return the filtered series list, or None if Sonarr could not be read."""
+        all_series = await self.get_all_series()
+        if all_series is None:
+            return None
+
+        filter_mode = (filter_mode or "type").strip()
+
         if filter_mode == "type":
-            return [
+            matched = [
                 self._slim_series(s)
                 for s in all_series
                 if s.get("seriesType") == "anime"
             ]
-
-        if filter_mode.startswith("tag:"):
+        elif filter_mode.startswith("tag:"):
             tag_name = filter_mode[4:]
             tag_id = await self._resolve_tag(tag_name)
             if tag_id is None:
                 logger.warning("Tag '%s' not found in Sonarr", tag_name)
                 return None
-            return [
+            matched = [
                 self._slim_series(s)
                 for s in all_series
                 if tag_id in s.get("tags", [])
             ]
+        else:
+            if filter_mode not in ("all", "*"):
+                logger.warning("Unknown filter_mode '%s', returning all series", filter_mode)
+            matched = [self._slim_series(s) for s in all_series]
 
-        logger.warning("Unknown filter_mode '%s', returning all series", filter_mode)
-        return [self._slim_series(s) for s in all_series]
+        if all_series and not matched:
+            # The single most common "Babel sees nothing" report: Sonarr is
+            # connected and full of shows, but none of them match the filter.
+            # Silence here looks identical to an empty Sonarr, so say exactly
+            # what did not match and what to change.
+            logger.warning(
+                "Sonarr has %d series but none matched the filter %r. %s",
+                len(all_series), filter_mode, self.filter_hint(filter_mode, all_series),
+            )
+
+        return matched
+
+    @staticmethod
+    def series_type_counts(all_series: list[dict]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for s in all_series:
+            key = s.get("seriesType") or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    @classmethod
+    def filter_hint(cls, filter_mode: str, all_series: list[dict]) -> str:
+        """Actionable advice for a filter that matched nothing."""
+        if filter_mode == "type":
+            counts = cls.series_type_counts(all_series)
+            breakdown = ", ".join(f"{n} {t}" for t, n in sorted(counts.items()))
+            return (
+                f"Series types in Sonarr: {breakdown}. Anime Filter is 'type', which only "
+                "matches series whose type is 'anime' — set it to 'all' (every series) or "
+                "'tag:YourTag' in Settings, or change the series type in Sonarr."
+            )
+        if filter_mode.startswith("tag:"):
+            return (
+                f"No series carries the tag {filter_mode[4:]!r}. Tag them in Sonarr or set "
+                "Anime Filter to 'type' or 'all' in Settings."
+            )
+        return "Check the Anime Filter setting."
 
     async def get_episodes(self, series_id: int) -> list[dict] | None:
         """Return the series' episodes, or None if Sonarr could not be read."""
@@ -197,6 +243,33 @@ class SonarrClient:
             return True
         except httpx.HTTPError as e:
             logger.error("Failed to trigger episode search: %s", e)
+            return False
+
+    async def set_episodes_monitored(
+        self, episode_ids: list[int], monitored: bool = True
+    ) -> bool:
+        """PUT /api/v3/episode/monitor -- set the monitored flag in bulk.
+
+        Sonarr only grabs episodes it monitors on its own schedule, so an
+        episode left unmonitored gets exactly one shot: the search Babel
+        triggers. Monitoring the ones a dub is expected for means Sonarr keeps
+        looking after Babel stops.
+        """
+        ids = [eid for eid in episode_ids if eid and eid > 0]
+        if not ids:
+            return True
+        try:
+            resp = await self.client.put(
+                "/episode/monitor",
+                json={"episodeIds": ids, "monitored": monitored},
+            )
+            resp.raise_for_status()
+            logger.info(
+                "Set monitored=%s for %d episodes in Sonarr", monitored, len(ids)
+            )
+            return True
+        except httpx.HTTPError as e:
+            logger.error("Failed to update monitored status: %s", e)
             return False
 
     async def get_queue(self) -> list[dict]:

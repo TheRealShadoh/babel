@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     SONARR_API_KEY: str = ""
     PLEX_URL: str = ""
     PLEX_TOKEN: str = ""
+    JELLYFIN_URL: str = ""
+    JELLYFIN_API_KEY: str = ""
+    # "auto" picks whichever of Plex/Jellyfin is configured (Plex first when
+    # both are); "plex"/"jellyfin" pin one; "none" disables the media server
+    # and leaves audio detection to ffprobe.
+    MEDIA_SERVER: str = "auto"
     SCAN_INTERVAL_HOURS: int = 6
     TARGET_LANGUAGE: str = "eng"
     SEARCH_COOLDOWN_DAYS: int = 7
@@ -21,6 +27,7 @@ class Settings(BaseSettings):
     SONARR_PATH_PREFIX: str = ""
     LOCAL_PATH_PREFIX: str = "/media"
     PLEX_PATH_PREFIX: str = ""
+    JELLYFIN_PATH_PREFIX: str = ""
     ANIME_FILTER: str = "type"
     WEB_PORT: int = 8686
     LOG_LEVEL: str = "INFO"
@@ -35,6 +42,14 @@ class Settings(BaseSettings):
     DISCORD_WEBHOOK_URL: str = ""
     AUTO_COLLECTIONS_PLEX: str = "true"
     AUTO_RESOLVE_IMPORTS: str = "true"
+    # On by default, like Babel's other automations. It only ever *adds*
+    # monitoring, and only to sub-only episodes of series Babel is already
+    # searching for a dub — the same episodes it asks Sonarr to search. Turn
+    # it off if you keep episodes deliberately unmonitored.
+    AUTO_MONITOR_DUBS: str = "true"
+    # Ask Anime News Network about the titles MyAnimeList cannot settle. Two
+    # extra requests per unsettled title, paced at ANN's ~1/second guidance.
+    DUB_LOOKUP_ANN: str = "true"
     STUCK_IMPORT_DRY_RUN: str = "false"
 
     # --- ffprobe / hung-mount hardening -------------------------------------
@@ -73,14 +88,23 @@ ISO_639_MAP: dict[str, str] = {
 def translate_path(sonarr_path: str, target: str, cfg: dict) -> str:
     """Rewrite a Sonarr-reported path to the equivalent local or Plex path.
 
-    *cfg* is an effective-settings dict (see get_effective_settings) so that
-    DB-configured path prefixes take effect without a restart.
+    *target* is "local", "plex" or "jellyfin"; *cfg* is an effective-settings
+    dict (see get_effective_settings) so that DB-configured path prefixes take
+    effect without a restart.
     """
     prefix = cfg.get("SONARR_PATH_PREFIX", "")
     if not prefix or not sonarr_path.startswith(prefix):
         return sonarr_path
     if target == "plex":
         replacement = cfg.get("PLEX_PATH_PREFIX", "") or cfg.get("LOCAL_PATH_PREFIX", "/media")
+    elif target == "jellyfin":
+        # Jellyfin usually sees the same paths as Plex when both run on the
+        # same host, so its own prefix is optional and falls back to Plex's.
+        replacement = (
+            cfg.get("JELLYFIN_PATH_PREFIX", "")
+            or cfg.get("PLEX_PATH_PREFIX", "")
+            or cfg.get("LOCAL_PATH_PREFIX", "/media")
+        )
     else:
         replacement = cfg.get("LOCAL_PATH_PREFIX", "/media")
     return sonarr_path.replace(prefix, replacement, 1)
